@@ -21,9 +21,9 @@ import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import type { AgentState, CdogConfig } from './types.js';
 import { loadState, mutateAgent } from './state.js';
-import { loadConfig } from './config.js';
+import { loadConfig, buildRecoverCommand } from './config.js';
 import { tmuxHasSession, sleep, parseTokenCount } from './util.js';
-import { tmux, tmuxSendKey, tmuxCapturePane, tmuxSendText } from './util.js';
+import { tmux, tmuxSendKey, tmuxSendText } from './util.js';
 import { killPaneWatcher } from './panewatcher.js';
 import {
   breakToShell,
@@ -37,10 +37,38 @@ import { notify } from './notify.js';
 // ---- Constants ----
 const DEFAULT_THRESHOLD = 3;
 const RECOVER_COOLDOWN_MS = 60_000; // min interval between recovery triggers
+const QUOTA_NUDGE_DELAY_SEC = 30; // wait 30s after quota reset before nudging
 
 // ---- API error line regex ----
 // Matches: 2026-06-22T19:40:41.805Z [ERROR] API error (attempt 1/11): ...
 export const API_ERROR_RE = /\[ERROR\]\s+API error/;
+
+// ---- Quota reset time parser ----
+// Matches: "It will reset at 2026-06-24 07:07:31 +0800 CST"
+// Also matches without timezone suffix: "It will reset at 2026-06-24 07:07:31"
+export const QUOTA_RESET_RE = /reset at (\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?)/i;
+
+/**
+ * Parse quota reset time from an API error line.
+ * Returns the reset Date, or null if no reset time found.
+ *
+ * Example input:
+ *   "429 AccountQuotaExceeded ... It will reset at 2026-06-24 07:07:31 +0800 CST ..."
+ *
+ * The timezone offset in the message is "+0800" (no colon), which JS Date doesn't
+ * parse natively. We normalize it to "+08:00" for ISO 8601 compatibility.
+ */
+export function parseQuotaResetTime(line: string): Date | null {
+  const match = line.match(QUOTA_RESET_RE);
+  if (!match) return null;
+  let raw = match[1].trim();
+  // Normalize timezone: "+0800" → "+08:00", "-0500" → "-05:00"
+  raw = raw.replace(/([+-])(\d{2})(\d{2})$/, '$1$2:$3');
+  // Parse as local time if no timezone present
+  const dt = new Date(raw);
+  if (isNaN(dt.getTime())) return null;
+  return dt;
+}
 
 // ---- Successful response indicators (resets error counter) ----
 // Real claude debug log markers for a successful API response:
@@ -77,8 +105,9 @@ export type ApiErrorKind =
 
 /** Classify an API error line from the log. */
 export function classifyApiError(line: string): ApiErrorKind {
-  // Fatal: model_not_found means the model is offline — stop immediately
-  if (/model_not_found|authentication_failed|billing_error/i.test(line)) return 'fatal';
+  // Fatal: model_not_found / authentication_failed / billing_error / oauth_org_not_allowed
+  // → model offline or auth issue, stop immediately
+  if (/model_not_found|authentication_failed|billing_error|oauth_org_not_allowed/i.test(line)) return 'fatal';
   // Rate limit
   if (/rate.?limit|公平使用|frequency|429/i.test(line)) return 'rate_limit';
   // Provider errors: 503, upstream error, overloaded_error (model busy)
@@ -334,7 +363,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
       // API error → classify and handle by kind
       if (API_ERROR_RE.test(trimmed)) {
         const kind = classifyApiError(trimmed);
-        writeWatcherLog(agentName, `API error: kind=${kind} (line: ${trimmed.slice(0, 120)})`);
+        writeWatcherLog(agentName, `API error: kind=${kind} (line: ${trimmed})`);
 
         // Read last known ↑ tokens from state (recorded by pane watcher).
         // This allows fast-path: if context was already near-full, act on first error.
@@ -349,7 +378,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
           ? ` (↑ ${lastUpTokens}/${maxTokens} = ${Math.round((lastUpTokens / maxTokens) * 100)}%)`
           : '';
         notify(agentName, 'api-error', agentName,
-          `API error (${kind})${tokenInfo}: ${trimmed.slice(0, 100)}`);
+          `API error (${kind})${tokenInfo}: ${trimmed}`);
 
         if (kindThreshold !== null) {
           // unknown / timeout → count toward intervention threshold
@@ -394,8 +423,27 @@ export async function runLogWatcher(agentName: string): Promise<void> {
           if (kind === 'fatal') {
             // model_not_found / authentication_failed → model is offline, stop immediately
             writeWatcherLog(agentName, `FATAL error (${kind}): stopping agent — model offline`);
-            handleFatalError(agentName, trimmed);
+            handleFatalError(agentName, trimmed).catch(() => {});
             return; // watcher exits after fatal
+          }
+          // Check for quota exceeded with reset time → breakToShell + schedule nudge
+          // breakToShell stops claude's retry loop (C-c → claude exits to shell),
+          // then scheduleQuotaNudge waits for reset_time + 30s to nudge/resume.
+          if (kind === 'rate_limit') {
+            const resetTime = parseQuotaResetTime(trimmed);
+            if (resetTime) {
+              const tmuxSession = currentState?.tmux_session ?? agentName;
+              if (tmuxHasSession(tmuxSession)) {
+                writeWatcherLog(agentName, `quota exceeded, breaking to shell before scheduling nudge`);
+                breakToShell(tmuxSession).then(() => {
+                  scheduleQuotaNudge(agentName, resetTime, trimmed);
+                }).catch(() => {
+                  scheduleQuotaNudge(agentName, resetTime, trimmed);
+                });
+              } else {
+                scheduleQuotaNudge(agentName, resetTime, trimmed);
+              }
+            }
           }
           // provider / rate_limit → let claude retry.
           // Notification already sent above (on every API error).
@@ -434,39 +482,25 @@ function writeWatcherLog(agentName: string, message: string): void {
 /**
  * Handle a fatal API error (model_not_found, authentication_failed, etc.).
  *
- * Stops the agent immediately using the marker technique:
- *   1. Type "cdog-stop" marker (no Enter — stays on input line).
- *   2. Send C-c to interrupt claude.
- *   3. Check if marker survived:
- *      - Marker gone → C-c took effect (claude interrupted/killed). Done.
- *      - Marker still there → C-c didn't work. C-u to clear marker.
- *   4. Mark agent as `failed` with fatal_error reason.
- *   5. Kill tmux session.
- *   6. Kill pane watcher (this log watcher exits via return).
- *   7. Send desktop notification.
+ * Stops the agent immediately using breakToShell (marker → C-c → C-u):
+ *   1. breakToShell to interrupt claude and get to a clean shell prompt.
+ *   2. Mark agent as `failed` with fatal_error reason.
+ *   3. Kill tmux session.
+ *   4. Kill pane watcher (this log watcher exits via return).
+ *   5. Send desktop notification.
  *
  * No anti-nudge needed — fatal errors don't trigger Stop hook (claude is killed, not stopped).
  */
-function handleFatalError(agentName: string, errorLine: string): void {
+async function handleFatalError(agentName: string, errorLine: string): Promise<void> {
   const state = loadState()[agentName];
   if (!state) return;
 
   const tmuxSession = state.tmux_session ?? agentName;
-  const MARKER = 'cdog-stop';
 
-  // 1-3. Marker technique: type marker, C-c, check if it survived
+  // 1. breakToShell: marker → C-c → check → C-u
   if (tmuxHasSession(tmuxSession)) {
     try {
-      tmuxSendText(tmuxSession, MARKER, false); // no Enter — marker stays on input line
-      tmuxSendKey(tmuxSession, 'C-c');
-      sleep(500);
-      const pane = tmuxCapturePane(tmuxSession, 10);
-      if (!pane.includes(MARKER)) {
-        // Marker gone → C-c took effect (claude interrupted/killed). Done.
-      } else {
-        // Marker survived → C-c didn't work. C-u to clear marker, then proceed to kill.
-        tmuxSendKey(tmuxSession, 'C-u');
-      }
+      await breakToShell(tmuxSession);
     } catch { /* best effort */ }
   }
 
@@ -476,7 +510,7 @@ function handleFatalError(agentName: string, errorLine: string): void {
       a.claude_status = 'failed';
       a.cdog_status = 'detached';
       a.stop_reason = 'failed';
-      a.fatal_error = errorLine.slice(0, 200);
+      a.fatal_error = errorLine;
       a.failed_at = new Date().toISOString();
       a.ended_at = new Date().toISOString();
     });
@@ -492,7 +526,124 @@ function handleFatalError(agentName: string, errorLine: string): void {
 
   // 7. Notify
   notify(agentName, 'agent-failed', agentName,
-    `FATAL: model offline — ${errorLine.slice(0, 120)}`).catch(() => {});
+    `FATAL: model offline — ${errorLine}`).catch(() => {});
+}
+
+// Track active quota timers per agent to avoid duplicate scheduling
+const quotaTimers = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Schedule a nudge after the quota reset time + delay.
+ *
+ * When Claude Code hits AccountQuotaExceeded, the error message includes a reset
+ * time (e.g. "It will reset at 2026-06-24 07:07:31 +0800 CST"). We parse that,
+ * wait until reset + 30s, then send a nudge to resume work.
+ *
+ * If the reset time has already passed, nudge immediately.
+ * If a timer is already scheduled for this agent, the earlier one wins (no reschedule).
+ */
+function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: string): void {
+  // Don't schedule duplicate timers
+  if (quotaTimers.has(agentName)) {
+    writeWatcherLog(agentName, `quota nudge already scheduled, skipping`);
+    return;
+  }
+
+  const now = Date.now();
+  const resetMs = resetTime.getTime();
+  const waitMs = Math.max(0, resetMs - now) + QUOTA_NUDGE_DELAY_SEC * 1000;
+  const resetLocal = resetTime.toLocaleString();
+
+  if (waitMs <= QUOTA_NUDGE_DELAY_SEC * 1000) {
+    // Reset time already passed — nudge soon (just the delay)
+    writeWatcherLog(agentName, `quota reset already passed (${resetLocal}), nudging in ${QUOTA_NUDGE_DELAY_SEC}s`);
+  } else {
+    const waitMin = Math.round(waitMs / 60_000);
+    writeWatcherLog(agentName, `quota exceeded, reset at ${resetLocal}, scheduling nudge in ${waitMin}min`);
+  }
+
+  // Record next nudge time in state for status display
+  const nudgeAt = new Date(now + waitMs);
+  try {
+    mutateAgent(agentName, (a) => {
+      a.next_nudge_at = nudgeAt.toISOString();
+    });
+  } catch { /* best effort */ }
+
+  const timer = setTimeout(() => {
+    quotaTimers.delete(agentName);
+
+    // Clear next_nudge_at — nudge is firing now
+    try {
+      mutateAgent(agentName, (a) => {
+        a.next_nudge_at = null;
+      });
+    } catch { /* best effort */ }
+
+    // Check if agent is still alive and watching
+    const state = loadState()[agentName];
+    if (!state) {
+      writeWatcherLog(agentName, `quota nudge fired but agent gone, skipping`);
+      return;
+    }
+    if (state.cdog_status === 'detached') {
+      writeWatcherLog(agentName, `quota nudge fired but detached, skipping`);
+      return;
+    }
+
+    const tmuxSession = state.tmux_session ?? agentName;
+    const sessionId = state.session_id;
+
+    // Read prompt from config
+    let prompt = DEFAULT_PROMPT;
+    let cfg: CdogConfig | null = null;
+    try {
+      if (state.config_path) {
+        cfg = loadConfig(state.config_path);
+        prompt = cfg.watchdog?.api_error_auto_compact?.prompt
+          ?? cfg.watchdog?.prompt
+          ?? DEFAULT_PROMPT;
+      }
+    } catch { /* best effort */ }
+
+    if (!tmuxHasSession(tmuxSession)) {
+      // tmux session died (claude exited after quota errors) — recreate it
+      // with `claude --resume` to continue the same conversation.
+      writeWatcherLog(agentName, `quota reset reached, tmux dead — recreating session with --resume`);
+      try {
+        if (cfg) {
+          const recoverCmd = buildRecoverCommand(cfg, sessionId);
+          tmux(['new-session', '-d', '-s', tmuxSession, '-c', cfg.cwd, recoverCmd]);
+          // Update state
+          mutateAgent(agentName, (a) => {
+            a.claude_status = 'running';
+            a.cdog_status = 'watching';
+            a.stop_reason = null;
+            a.ended_at = null;
+          });
+          // Wait for claude to start, then nudge
+          setTimeout(() => {
+            if (tmuxHasSession(tmuxSession)) {
+              writeWatcherLog(agentName, `session recreated, nudging with "${prompt}"`);
+              try { tmuxSendText(tmuxSession, prompt, true); } catch { /* best effort */ }
+            }
+          }, 3000);
+        }
+      } catch (e) {
+        writeWatcherLog(agentName, `failed to recreate session: ${(e as Error).message}`);
+      }
+    } else {
+      // tmux session alive — just nudge
+      writeWatcherLog(agentName, `quota reset reached, nudging with "${prompt}"`);
+      try { tmuxSendText(tmuxSession, prompt, true); } catch { /* best effort */ }
+    }
+
+    // Notify
+    notify(agentName, 'nudge', agentName,
+      `Quota reset — auto-nudge sent`).catch(() => {});
+  }, waitMs);
+
+  quotaTimers.set(agentName, timer);
 }
 
 // ============================================================
@@ -545,12 +696,7 @@ export async function recoverFromApiErrors(agentName: string): Promise<void> {
   }
 
   // 1. Break to shell (marker → C-c → check marker → C-u)
-  const broke = await breakToShell(session, 5000);
-  if (!broke) {
-    logAgentEvent(agentName, 'recover-from-errors: breakToShell failed (marker survived 2x C-c), aborting to avoid killing wrong process');
-    notify(agentName, 'api-error', agentName, 'Recovery aborted: C-c did not take effect (marker survived)');
-    return;
-  }
+  await breakToShell(session, 5000);
 
   // 2. Compact or nudge based on last_up_tokens
   const { action, upTokens } = compactOrNudge(session, acConfig.maxTokens, acConfig.prompt, agentName);

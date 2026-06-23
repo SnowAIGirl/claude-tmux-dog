@@ -16,7 +16,7 @@ A Claude Code process manager and inter-agent message bus. Starts long-running C
 | 3 | **Auto-nudge** | On every `Stop` hook, auto-send a configurable prompt (e.g. `"continue"`) so the agent keeps working autonomously — like a hands-free loop |
 | 4 | **Auto-recovery** | On recoverable `StopFailure` (rate limit, overloaded, timeout, server error), runs a **cdog-recover** flow: Ctrl-C + `compactOrNudge` (compact if context ≥ 80%, else nudge). Circuit breaker trips after 3 failures in 5 minutes |
 | 5 | **Dual-layer context defense** | **Pane watcher** (proactive): monitors `↑ tokens` in the tmux pane via `pipe-pane`, compacts at 80% before errors happen. **Log watcher** (reactive): tails the claude debug log, classifies API errors by type, triggers compact-or-nudge on threshold. Compact completion detected via `PostCompact` hook — no hardcoded delays |
-| 6 | **API error classification** | Errors are classified as `timeout` / `provider` / `rate_limit` / `unknown` with per-kind thresholds. `overloaded_error` → provider (not context). Provider/rate_limit errors never compact — they let claude retry |
+| 6 | **API error classification** | Errors are classified as `fatal` / `timeout` / `provider` / `rate_limit` / `unknown` with per-kind thresholds. `fatal` (model offline, auth failure) stops the agent immediately. `overloaded_error` → provider (not context). Provider errors never compact — they let claude retry. Rate limit with reset time → breakToShell + scheduled nudge |
 | 7 | **State sharing** | Pane watcher records `last_up_tokens` to state; log watcher reads it on the first API error for a fast-path (threshold → 1 if tokens ≥ 70% of max) |
 | 8 | **Message relaying** | `cdog message send` sends arbitrary text to a running agent's tmux pane, with optional `--from` attribution and `--reply-method` for building reply chains |
 | 9 | **Auto-shutdown** | `max_run` stores a deadline timestamp; on `SessionEnd`, if the deadline has passed, the agent is marked `completed` and the tmux session is killed. No cron, no at — passive check on hook event |
@@ -146,10 +146,10 @@ Tails the claude debug log for `[ERROR] API error` lines, classifies them, and t
 
 | Kind | Matches | Threshold | Action |
 |------|---------|-----------|--------|
-| `fatal` | `model_not_found`, `authentication_failed`, `billing_error` | immediate | **Stop agent** — C-c (marker technique) → mark `failed` → kill tmux → kill watchers → notify |
+| `fatal` | `model_not_found`, `authentication_failed`, `billing_error`, `oauth_org_not_allowed` | immediate | **Stop agent** — C-c (marker technique) → mark `failed` → kill tmux → kill watchers → notify |
 | `timeout` | `timed out`, `524`, `TTFB`, `no response headers` | `max(threshold * 2, 6)` | C-c → breakToShell → compact-or-nudge |
 | `provider` | `503`, `upstream error`, `no available channel`, `overloaded_error`, `访问量过大`, `稍后再试` | never | Let claude retry; notify on every error |
-| `rate_limit` | `rate_limit`, `公平使用`, `frequency`, `429` | never | Let claude retry; notify on every error |
+| `rate_limit` | `rate_limit`, `公平使用`, `frequency`, `429` | never | If reset time found (e.g. `AccountQuotaExceeded`): breakToShell + schedule nudge for `reset_time + 30s`. Otherwise: let claude retry |
 | `unknown` | (unclassified) | `threshold` (default 3) | C-c → breakToShell → compact-or-nudge |
 
 > **Note:** `overloaded_error` in the API response means the *model* is overloaded (provider-side), NOT that the context window is full. A full context window typically shows up as `unknown` + "Request timed out", not as `overloaded_error`.

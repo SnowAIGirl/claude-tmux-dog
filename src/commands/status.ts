@@ -50,7 +50,7 @@ function printTable(): void {
     return;
   }
 
-  const headers = ['name', 'session', 'status', 'claude', 'auto-nudge', 'context', 'nudge', '↺', 'uptime', 'started_at'];
+  const headers = ['name', 'session', 'status', 'claude', 'auto-nudge', 'context', 'nudge', '↺', 'uptime', 'next nudge', 'started_at'];
   const rows = names.map((n) => {
     const a = state[n];
     const alive = tmuxHasSession(a.tmux_session);
@@ -70,6 +70,9 @@ function printTable(): void {
       : '–';
     const sess = a.session_id ? a.session_id.slice(0, 8) : '–';
     const started = formatTime(a.started_at, a.timeformat || DEFAULT_TIMEFORMAT);
+    const nextNudge = a.next_nudge_at
+      ? ANSI.yellow(formatTime(a.next_nudge_at, a.timeformat || DEFAULT_TIMEFORMAT))
+      : ANSI.dim('–');
     const autoNudge = a.watchdog?.auto_nudge_stop ? ANSI.green('on') : ANSI.dim('off');
     const maxNum = resolveMaxTokens(a);
     let context: string;
@@ -92,6 +95,7 @@ function printTable(): void {
       ANSI.dim(String(a.nudge_count ?? 0)),
       ANSI.dim(String(a.restart_count ?? 0)),
       up,
+      nextNudge,
       ANSI.dim(started),
     ];
   });
@@ -178,6 +182,7 @@ function printDetail(name: string): void {
   console.log(row('Auto-nudge:', autoNudgeStatus));
   console.log(row('Last error:', a.last_error ?? '—'));
   if (a.last_restart_at) console.log(row('Last restart:', formatTime(a.last_restart_at, fmt)));
+  if (a.next_nudge_at) console.log(row('Next nudge:', ANSI.yellow(formatTime(a.next_nudge_at, fmt))));
   if (a.config_path) console.log(row('Config:', a.config_path));
   if (a.log_path) console.log(row('Claude log:', a.log_path));
   if (a.log_file_path) console.log(row('cdog log:', a.log_file_path));

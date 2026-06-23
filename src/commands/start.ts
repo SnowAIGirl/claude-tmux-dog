@@ -17,8 +17,8 @@ import {
 import { hooksInstalled, hooksConfigured, installHookScripts, mergeHookSettings } from '../hooks.js';
 import { logAndEcho, startedLine } from '../logger.js';
 import { notify } from '../notify.js';
-import { spawnLogWatcher } from '../logwatcher.js';
-import { spawnPaneWatcher } from '../panewatcher.js';
+import { spawnLogWatcher, killLogWatcher } from '../logwatcher.js';
+import { spawnPaneWatcher, killPaneWatcher } from '../panewatcher.js';
 
 /** Pick a tmux session name that isn't already in use, with `-1`, `-2` suffixes. */
 function uniqueTmuxSession(base: string): string {
@@ -95,20 +95,27 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
   // Build command (buildStartCommand always adds --debug-file now).
   const { cmd } = buildStartCommand(cfg, sessionId);
 
-  tmux(['new-session', '-d', '-s', tmuxSession, '-c', cfg.cwd, cmd]);
-  await sleep(2000);
-
-  const pid = tmuxPanePid(tmuxSession);
-
+  // Pre-register agent state BEFORE starting claude, so watchers can start
+  // tailing the log file before claude writes its first line.
+  // This ensures the log watcher catches the very first API error (e.g. 429
+  // quota exceeded at startup) without missing any lines.
   const maxRunMs = parseDuration(cfg.watchdog?.max_run);
   const maxRunDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : null;
+
+  // Kill any leftover watcher processes from a previous run before overwriting state.
+  // Must happen BEFORE upsertAgent, otherwise the old watcher_pid in state is lost
+  // and killLogWatcher/killPaneWatcher can't find the PID to kill.
+  if (existing) {
+    killLogWatcher(cfg.name);
+    killPaneWatcher(cfg.name);
+  }
 
   const agent: AgentState = {
     name: cfg.name,
     session_id: sessionId,
-    pid,
+    pid: undefined,         // filled after tmux starts
     tmux_session: tmuxSession,
-    claude_status: 'running',
+    claude_status: 'starting',
     cdog_status: 'watching',
     stop_reason: null,
     ended_at: null,
@@ -133,18 +140,30 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
     compact_in_progress: false,
     compact_sent_at: null,
     compact_pending_prompt: null,
+    next_nudge_at: null,
     watchdog: cfg.watchdog,
   };
   upsertAgent(agent);
 
-  // Spawn log watcher (reactive: API error → C-c → /context → compact-or-nudge)
-  // Always spawn both watchers — cdog always passes --debug-file so a log
-  // file always exists. This is the "强制但全面" (forceful but comprehensive)
-  // approach: dual-layer defense is always on.
+  // Start watchers BEFORE claude — they tail the log file and pane,
+  // so they're ready to catch the very first error.
   spawnLogWatcher(agent);
   spawnPaneWatcher(agent);
 
-  logAndEcho(cfg.name, startedLine(agent));
+  // Now start claude inside tmux.
+  tmux(['new-session', '-d', '-s', tmuxSession, '-c', cfg.cwd, cmd]);
+  await sleep(2000);
+
+  const pid = tmuxPanePid(tmuxSession);
+
+  // Update state with PID and mark as running.
+  mutateAgent(cfg.name, (a) => {
+    a.pid = pid;
+    a.claude_status = 'running';
+  });
+
+  const updatedAgent = getAgent(cfg.name)!;
+  logAndEcho(cfg.name, startedLine(updatedAgent));
   await notify(cfg.name, 'agent-started', cfg.name, `Started, session=${sessionId.slice(0, 8)}`);
   console.log(`✓ ${cfg.name} started`);
   console.log(`  Session:   ${sessionId}`);

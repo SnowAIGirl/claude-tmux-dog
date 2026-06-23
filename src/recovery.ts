@@ -57,22 +57,13 @@ export async function waitForShellPrompt(session: string, timeoutMs: number): Pr
  * Uses the cdog-recover marker technique to avoid killing the wrong process:
  *
  *   1. Type the marker text (RECOVER_MARKER) into the input line WITHOUT Enter.
- *      - If claude is in the foreground: the marker goes into claude's input box.
- *      - If a shell is in the foreground: the marker goes onto the shell command line.
  *   2. Send C-c.
- *      - If claude was foreground: C-c kills/exits claude, the marker text
- *        disappears with claude's input box. Shell prompt appears.
- *      - If shell was foreground: C-c interrupts the current shell command,
- *        the marker text is cleared from the shell input line, shell prompt reappears.
- *   3. Check if the marker survived in the pane capture.
- *      - marker NOT found → C-c took effect on the foreground process (claude
- *        or a shell command). Safe to proceed.
- *      - marker still found → C-c didn't take effect (process may be stuck).
- *        Retry C-c once. If marker still survives, abort recovery to avoid
- *        sending commands into an unknown state.
- *   4. C-u to clear any residual input, ensuring a clean line.
+ *   3. Wait for shell prompt.
+ *   4. Check if marker survived in the pane:
+ *      - marker present → claude was interrupted, marker text left behind → C-u to clear.
+ *      - marker gone    → shell was foreground, C-c already cleared the input line → done.
  *
- * Returns true if the pane is confirmed at a shell prompt and safe to proceed.
+ * Always returns true.
  */
 export async function breakToShell(session: string, timeoutMs = 5000): Promise<boolean> {
   // 1. Write marker (no Enter — stays on input line)
@@ -83,23 +74,15 @@ export async function breakToShell(session: string, timeoutMs = 5000): Promise<b
   tmuxSendKey(session, 'C-c');
 
   // 3. Wait for shell prompt to confirm C-c took effect
-  let ready = await waitForShellPrompt(session, timeoutMs);
+  await waitForShellPrompt(session, timeoutMs);
 
-  // 4. Check if marker survived — if it did, C-c didn't work, retry once
-  if (!ready || markerInPane(session)) {
-    tmuxSendKey(session, 'C-c');
-    await sleep(1500);
-    ready = await waitForShellPrompt(session, 2000);
-    if (markerInPane(session)) {
-      // Marker still there after two C-c attempts — abort to avoid killing wrong process
-      return false;
-    }
+  // 4. marker survived → claude was interrupted, marker text left in pane → C-u to clear
+  //    marker gone    → shell was foreground, C-c cleared the input line → nothing to do
+  if (markerInPane(session)) {
+    tmuxSendKey(session, 'C-u');
+    await sleep(300);
   }
-
-  // 5. C-u to clear input line (removes any residual marker text)
-  tmuxSendKey(session, 'C-u');
-  await sleep(300);
-  return ready;
+  return true;
 }
 
 /**

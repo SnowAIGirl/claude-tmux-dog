@@ -185,33 +185,29 @@ export async function handleStopFailure(ev: StopFailureEvent): Promise<void> {
 
     const session = agent.tmux_session;
     if (tmuxHasSession(session) && detectLiveness(session) !== 'dead') {
-      const broke = await breakToShell(session, 3000);
-      if (!broke) {
-        logAgentEvent(agent.name, 'StopFailure context-overload: breakToShell failed (marker survived), skipping');
-      } else {
-        const maxTokens = cfg?.watchdog?.max_tokens
-          ? parseTokenCount(cfg.watchdog.max_tokens)
-          : 200_000;
-        const prompt = resolvePrompt(cfg);
-        const { action, upTokens } = compactOrNudge(session, maxTokens, prompt, agent.name);
+      await breakToShell(session, 3000);
+      const maxTokens = cfg?.watchdog?.max_tokens
+        ? parseTokenCount(cfg.watchdog.max_tokens)
+        : 200_000;
+      const prompt = resolvePrompt(cfg);
+      const { action, upTokens } = compactOrNudge(session, maxTokens, prompt, agent.name);
 
-        if (action === 'compact') {
-          logAgentEvent(agent.name, `StopFailure context-overload: → /compact (↑ ${upTokens ?? 'unknown'} tokens >= ${Math.round(maxTokens * 0.8)})`);
-          const nextRestart = (agent.restart_count ?? 0) + 1;
-          mutateAgent(agent.name, (a) => {
-            a.claude_status = 'running';
-            a.stop_reason = null;
-            a.ended_at = null;
-            a.last_error = errSummary;
-            a.last_restart_at = localISO();
-            a.restart_count = nextRestart;
-            a.failures = failures;
-          });
-          await notify(agent.name, 'agent-recovered', agent.name, `Context-overload → /compact (↑ ${upTokens ?? 'unknown'} tokens) #${nextRestart}`);
-          return;
-        }
-        logAgentEvent(agent.name, `StopFailure context-overload: → nudge (↑ ${upTokens ?? 'unknown'} tokens < ${Math.round(maxTokens * 0.8)}), normal recovery`);
+      if (action === 'compact') {
+        logAgentEvent(agent.name, `StopFailure context-overload: → /compact (↑ ${upTokens ?? 'unknown'} tokens >= ${Math.round(maxTokens * 0.8)})`);
+        const nextRestart = (agent.restart_count ?? 0) + 1;
+        mutateAgent(agent.name, (a) => {
+          a.claude_status = 'running';
+          a.stop_reason = null;
+          a.ended_at = null;
+          a.last_error = errSummary;
+          a.last_restart_at = localISO();
+          a.restart_count = nextRestart;
+          a.failures = failures;
+        });
+        await notify(agent.name, 'agent-recovered', agent.name, `Context-overload → /compact (↑ ${upTokens ?? 'unknown'} tokens) #${nextRestart}`);
+        return;
       }
+      logAgentEvent(agent.name, `StopFailure context-overload: → nudge (↑ ${upTokens ?? 'unknown'} tokens < ${Math.round(maxTokens * 0.8)}), normal recovery`);
     } else {
       logAgentEvent(agent.name, 'StopFailure context-overload: session dead, fall through to normal recovery');
     }
@@ -229,12 +225,7 @@ export async function handleStopFailure(ev: StopFailureEvent): Promise<void> {
     tmux(['new-session', '-d', '-s', session, '-c', cfg.cwd, cmd]);
     logAgentEvent(agent.name, `StopFailure recover: new-session + resume (session dead, ${errorType})`);
   } else {
-    const broke = await breakToShell(session, 3000);
-    if (!broke) {
-      logAgentEvent(agent.name, `StopFailure recover: breakToShell failed (marker survived 2x C-c), skipping nudge to avoid killing wrong process`);
-      markFailed(agent.name, `${errSummary} (C-c did not take effect, marker survived)`, failures);
-      return;
-    }
+    await breakToShell(session, 3000);
     await runPostRecover(session, cfg, agent, errorType);
   }
 

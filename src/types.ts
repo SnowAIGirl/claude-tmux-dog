@@ -238,6 +238,8 @@ export interface AgentState {
   compact_sent_at?: string | null;
   /** Pending nudge prompt to send after PostCompact (set by whoever sent /compact). */
   compact_pending_prompt?: string | null;
+  /** ISO timestamp of the next scheduled quota nudge (null when no nudge scheduled). Cleared after nudge fires. */
+  next_nudge_at?: string | null;
   /** Runtime copy of watchdog config (for status display and watcher reads). */
   watchdog?: WatchdogConfig;
 }

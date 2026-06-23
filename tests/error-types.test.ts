@@ -23,6 +23,10 @@ describe('hooks/error-types.ts', () => {
       expect(FATAL_ERRORS.has('model_not_found')).toBe(true);
     });
 
+    it('includes oauth_org_not_allowed', () => {
+      expect(FATAL_ERRORS.has('oauth_org_not_allowed')).toBe(true);
+    });
+
     it('does not include rate_limit', () => {
       expect(FATAL_ERRORS.has('rate_limit')).toBe(false);
     });

@@ -70,11 +70,7 @@ export async function compactCommand(name?: string): Promise<void> {
   }
 
   // 1. Break to shell (marker → C-c → check marker → C-u)
-  const broke = await breakToShell(session, 5000);
-  if (!broke) {
-    console.error(`✗ ${name}: breakToShell failed (marker survived 2x C-c), aborting to avoid killing wrong process`);
-    process.exit(1);
-  }
+  await breakToShell(session, 5000);
 
   // 2. Compact or nudge based on last_up_tokens
   const { action, upTokens } = compactOrNudge(session, maxTokens, prompt, name);

@@ -11,8 +11,10 @@ import {
   classifyApiError,
   shouldIntervene,
   interveneThreshold,
+  parseQuotaResetTime,
   API_ERROR_RE,
   SUCCESS_RE,
+  QUOTA_RESET_RE,
 } from '../src/logwatcher.js';
 
 describe('logwatcher.ts', () => {
@@ -92,6 +94,7 @@ describe('logwatcher.ts', () => {
         ['model_not_found simple', 'model_not_found: model not available'],
         ['authentication_failed', 'authentication_failed: invalid key'],
         ['billing_error', 'billing_error: quota exceeded'],
+        ['oauth_org_not_allowed', 'oauth_org_not_allowed: org blocked'],
       ];
 
       cases.forEach(([name, line]) => {
@@ -132,6 +135,10 @@ describe('logwatcher.ts', () => {
 
       it('fatal takes priority over rate_limit', () => {
         expect(classifyApiError('rate_limit model_not_found')).toBe('fatal');
+      });
+
+      it('oauth_org_not_allowed classified as fatal even with 503', () => {
+        expect(classifyApiError('503 oauth_org_not_allowed')).toBe('fatal');
       });
 
       it('rate_limit takes priority over provider', () => {
@@ -264,6 +271,68 @@ describe('logwatcher.ts', () => {
       it('handles both null (no fast-path)', () => {
         expect(interveneThreshold('timeout', defaultThreshold, null, undefined)).toBe(6);
       });
+    });
+  });
+
+  describe('parseQuotaResetTime', () => {
+    it('parses reset time with +0800 timezone', () => {
+      const line = '429 AccountQuotaExceeded ... It will reset at 2026-06-24 07:07:31 +0800 CST ...';
+      const dt = parseQuotaResetTime(line);
+      expect(dt).not.toBeNull();
+      // 2026-06-24 07:07:31 +0800 = 2026-06-23 23:07:31 UTC
+      expect(dt!.getUTCFullYear()).toBe(2026);
+      expect(dt!.getUTCMonth()).toBe(5); // June = 5
+      expect(dt!.getUTCDate()).toBe(23); // UTC date
+      expect(dt!.getUTCHours()).toBe(23); // 07:07 +0800 = 23:07 UTC
+      expect(dt!.getUTCMinutes()).toBe(7);
+      expect(dt!.getUTCSeconds()).toBe(31);
+    });
+
+    it('parses reset time with -0500 timezone', () => {
+      const line = 'It will reset at 2026-06-24 07:07:31 -0500 EST';
+      const dt = parseQuotaResetTime(line);
+      expect(dt).not.toBeNull();
+      // -0500: 07:07 - (-5) = 12:07 UTC
+      expect(dt!.getUTCHours()).toBe(12);
+    });
+
+    it('parses reset time without timezone (local)', () => {
+      const line = 'It will reset at 2026-06-24 07:07:31';
+      const dt = parseQuotaResetTime(line);
+      expect(dt).not.toBeNull();
+      expect(dt!.getFullYear()).toBe(2026);
+    });
+
+    it('returns null when no reset time found', () => {
+      expect(parseQuotaResetTime('429 rate limit exceeded')).toBeNull();
+      expect(parseQuotaResetTime('some random error')).toBeNull();
+      expect(parseQuotaResetTime('')).toBeNull();
+    });
+
+    it('returns null for invalid date', () => {
+      expect(parseQuotaResetTime('It will reset at not-a-date +0800')).toBeNull();
+    });
+
+    it('handles the exact user-reported error line', () => {
+      const line = '429 {"error":{"code":"AccountQuotaExceeded","message":"You have exceeded the 5-hour usage quota. It will reset at 2026-06-24 07:07:31 +0800 CST. We recommend upgrading your plan for more quota, or waiting for the reset. Request id: 021782240887312b19f2272b96096885d7095f98214c210306bc8","param":"","type":"TooManyRequests"}}';
+      const dt = parseQuotaResetTime(line);
+      expect(dt).not.toBeNull();
+      expect(dt!.getUTCDate()).toBe(23); // 2026-06-24 07:07:31 +0800 = 2026-06-23 23:07:31 UTC
+      expect(dt!.getUTCHours()).toBe(23);
+    });
+  });
+
+  describe('QUOTA_RESET_RE', () => {
+    it('matches "reset at" with timezone', () => {
+      expect(QUOTA_RESET_RE.test('It will reset at 2026-06-24 07:07:31 +0800 CST')).toBe(true);
+    });
+
+    it('matches "reset at" without timezone', () => {
+      expect(QUOTA_RESET_RE.test('It will reset at 2026-06-24 07:07:31')).toBe(true);
+    });
+
+    it('does not match lines without reset time', () => {
+      expect(QUOTA_RESET_RE.test('429 rate limit')).toBe(false);
     });
   });
 });
