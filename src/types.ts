@@ -77,13 +77,24 @@ export interface NotifyConfig {
   /** Seconds to wait for user action on an interactive notification. Default 30. */
   ask_timeout?: number;
   /**
-   * Click on notification body → open the agent's tmux session in Terminal.app.
-   * Default true. Uses `terminal-notifier -execute` (macOS only).
-   * Note: macOS Do Not Disturb suppresses notification display, but queued
-   * notifications appear after DND is turned off. cdog cannot detect DND
-   * status from Node.js — the notification is always sent regardless.
+   * Click on notification body → open or focus the agent's tmux session in the
+   * configured terminal app. Default true. macOS: uses `terminal-notifier -execute`.
+   * If a tmux client is already attached to the session → focus/activate that
+   * terminal; otherwise → open a new window and `tmux attach`. Note: macOS Do
+   * Not Disturb suppresses notification display, but queued notifications appear
+   * after DND is turned off. cdog cannot detect DND status from Node.js — the
+   * notification is always sent regardless.
    */
   open_on_click?: boolean;
+  /**
+   * Terminal app to open/focus on notification click (when `open_on_click` is
+   * true). macOS examples: "Terminal" (default), "iTerm2", "Ghostty",
+   * "Alacritty", "kitty". Linux examples: "gnome-terminal", "konsole", "xterm",
+   * "alacritty", "kitty" (default: auto-detected). Unlisted apps use a generic
+   * `-e <command>` launch. The agent's tmux session is auto-detached-attached:
+   * already-open → focus, otherwise → open + attach.
+   */
+  terminal?: string;
 }
 
 export interface WatchdogConfig {

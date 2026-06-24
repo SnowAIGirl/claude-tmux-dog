@@ -14,6 +14,7 @@ import { NotificationCenter } from 'node-notifier';
 import type { NotifyConfig, NotifyEvent } from './types.js';
 import { loadState } from './state.js';
 import { loadConfig } from './config.js';
+import { buildTerminalClickCommand } from './terminal.js';
 
 /** Bundled assets dir: dist/notify.js -> ../assets */
 function assetsDir(): string {
@@ -102,8 +103,7 @@ export function notify(agentName: string, event: NotifyEvent, title: string, mes
       // Dedup: skip if same (agent, event) was notified recently.
       if (isDuplicate(agentName, event)) { resolve(); return; }
       // Click on notification body → open tmux session in Terminal.app.
-      const tmuxSession = openOnClickEnabled(cfg) ? resolveTmuxSession(agentName) : null;
-      const executeCmd = tmuxSession ? buildOpenTmuxCommand(tmuxSession) : undefined;
+      const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
       fireNotification(cfg, title, message, false, 0, undefined, undefined, () => {}, executeCmd);
       if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
     } catch {
@@ -119,22 +119,21 @@ export function notify(agentName: string, event: NotifyEvent, title: string, mes
 
 export type InteractiveChoice = 'action' | 'close' | 'timeout' | 'error';
 
-/** Is open_on_click enabled? Defaults to true (opt-out). */
+/** Is open_on_click enabled? Defaults to true (opt-opt). */
 function openOnClickEnabled(cfg: NotifyConfig): boolean {
   return cfg.open_on_click !== false;
 }
 
-/** Build a shell command that opens Terminal.app and attaches to the agent's
- * tmux session. Used as the `-execute` action when the user clicks the
- * notification body (not a button).
- *
- * Uses osascript to tell Terminal to run `tmux attach -t <session>`.
- * If Terminal is already open, it creates a new window for the session.
+/**
+ * Build the notification -execute command: opens or focuses the configured
+ * terminal app (`notify.terminal`, default Terminal.app) on the agent's tmux
+ * session. If a client is already attached → focus it; else → open + attach.
+ * Returns undefined if the agent has no tmux session.
  */
-function buildOpenTmuxCommand(tmuxSession: string): string {
-  // Escape double quotes in session name for safe embedding.
-  const safe = tmuxSession.replace(/"/g, '\\"');
-  return `osascript -e 'tell application "Terminal" to do script "tmux attach -t \\"${safe}\\""' -e 'activate'`;
+function buildExecuteCommand(cfg: NotifyConfig, agentName: string): string | undefined {
+  const session = resolveTmuxSession(agentName);
+  if (!session) return undefined;
+  return buildTerminalClickCommand(cfg.terminal, session);
 }
 
 /**
@@ -172,8 +171,7 @@ export function notifyInteractive(
       if (!cfg || !eventEnabled(cfg, event) || cfg.interactive !== true) {
         // Not interactive-capable → fire plain notify (if enabled) and resolve timeout.
         if (cfg && eventEnabled(cfg, event)) {
-          const tmuxSession = openOnClickEnabled(cfg) ? resolveTmuxSession(agentName) : null;
-          const executeCmd = tmuxSession ? buildOpenTmuxCommand(tmuxSession) : undefined;
+          const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
           fireNotification(cfg, title, message, false, 0, undefined, undefined, () => {}, executeCmd);
           if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
         }
@@ -183,8 +181,7 @@ export function notifyInteractive(
 
       if (process.platform !== 'darwin') {
         // Non-macOS: no blocking interaction. Plain notify + resolve timeout.
-        const tmuxSession = openOnClickEnabled(cfg) ? resolveTmuxSession(agentName) : null;
-        const executeCmd = tmuxSession ? buildOpenTmuxCommand(tmuxSession) : undefined;
+        const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
         fireNotification(cfg, title, message, false, 0, undefined, undefined, () => {}, executeCmd);
         if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
         resolve('timeout');
@@ -193,8 +190,7 @@ export function notifyInteractive(
 
       const timeoutSecs = cfg.ask_timeout && cfg.ask_timeout > 0 ? cfg.ask_timeout : 30;
       // Click on notification body → open tmux session in Terminal.app.
-      const tmuxSession = openOnClickEnabled(cfg) ? resolveTmuxSession(agentName) : null;
-      const executeCmd = tmuxSession ? buildOpenTmuxCommand(tmuxSession) : undefined;
+      const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
       fireNotification(
         cfg,
         title,

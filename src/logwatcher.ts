@@ -26,6 +26,7 @@ import { loadConfig, buildRecoverCommand } from './config.js';
 import { tmuxHasSession, sleep, parseTokenCount, parseDuration } from './util.js';
 import { tmux, tmuxSendKey, tmuxSendText } from './util.js';
 import { killPaneWatcher } from './panewatcher.js';
+import { enableTmuxTitles } from './terminal.js';
 import {
   breakToShell,
   compactOrNudge,
@@ -811,6 +812,7 @@ function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: strin
         if (cfg) {
           const recoverCmd = buildRecoverCommand(cfg, sessionId);
           tmux(['new-session', '-d', '-s', tmuxSession, '-c', cfg.cwd, recoverCmd]);
+          enableTmuxTitles(tmuxSession); // Linux: title-based click-to-focus
           // Update state
           mutateAgent(agentName, (a) => {
             a.claude_status = 'running';

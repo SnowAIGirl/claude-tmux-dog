@@ -14,6 +14,7 @@ import {
   sleep,
   parseDuration,
 } from '../util.js';
+import { enableTmuxTitles } from '../terminal.js';
 import { hooksInstalled, hooksConfigured, installHookScripts, mergeHookSettings } from '../hooks.js';
 import { logAndEcho, startedLine } from '../logger.js';
 import { notify } from '../notify.js';
@@ -152,6 +153,7 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
 
   // Now start claude inside tmux.
   tmux(['new-session', '-d', '-s', tmuxSession, '-c', cfg.cwd, cmd]);
+  enableTmuxTitles(tmuxSession); // Linux: put session name in title so click-to-focus works
   await sleep(2000);
 
   const pid = tmuxPanePid(tmuxSession);

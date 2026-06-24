@@ -35,6 +35,7 @@ import {
   localISO,
   parseTokenCount,
 } from '../util.js';
+import { enableTmuxTitles } from '../terminal.js';
 import { logAgentEvent } from '../logger.js';
 import { notify, notifyInteractive } from '../notify.js';
 import {
@@ -223,6 +224,7 @@ export async function handleStopFailure(ev: StopFailureEvent): Promise<void> {
     }
     const cmd = buildRecoverCommand(cfg, agent.session_id);
     tmux(['new-session', '-d', '-s', session, '-c', cfg.cwd, cmd]);
+    enableTmuxTitles(session); // Linux: title-based click-to-focus
     logAgentEvent(agent.name, `StopFailure recover: new-session + resume (session dead, ${errorType})`);
   } else {
     await breakToShell(session, 3000);

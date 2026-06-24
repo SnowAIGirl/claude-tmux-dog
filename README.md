@@ -179,6 +179,7 @@ The pane watcher also persists `last_up_tokens` to state, which the log watcher 
   "interactive": false,
   "ask_timeout": 30,
   "open_on_click": true,
+  "terminal": "Terminal",
   "on": {
     "agent-started": true,
     "agent-failed": true,
@@ -199,7 +200,8 @@ The pane watcher also persists `last_up_tokens` to state, which the log watcher 
 | `sound` | `false` | Play custom sound via afplay on notification |
 | `interactive` | `false` | Blocks for user response when auto-action is OFF (macOS only) |
 | `ask_timeout` | `30` | Seconds to wait for user action on interactive notification. On timeout, auto-executes the default action (nudge/recover) instead of skipping |
-| `open_on_click` | `true` | Click notification body → open the agent's tmux session in Terminal.app (macOS only) |
+| `open_on_click` | `true` | Click notification body → open or focus the agent's tmux session. If a client is already attached → focus that window/tab (Terminal.app/iTerm2 match the client's tty precisely; other macOS terminals activate the app; Linux matches by window title via wmctrl/xdotool). Otherwise → open a new window and `tmux attach` |
+| `terminal` | `"Terminal"` (macOS) / auto-detected (Linux) | Terminal app for click-to-open. macOS: `"Terminal"`, `"iTerm2"`, `"Ghostty"`, `"Alacritty"`, `"kitty"` (unlisted → generic launch). Linux: `"gnome-terminal"`, `"konsole"`, `"xterm"`, `"alacritty"`, `"kitty"`. On Linux, cdog enables tmux `set-titles` on the session so the title-based focus works |
 | `on` | all true | Per-event enable map. Unlisted events default to true |
 
 > **Do Not Disturb**: macOS DND suppresses notification display, but queued notifications appear after DND is turned off. cdog cannot detect DND status from Node.js — notifications are always sent regardless.
@@ -388,7 +390,7 @@ Reply Method: cdog message send --to hermes --message "已完成后端3个文件
 ## Caveats
 
 - **tmux required** — cdog manages Claude sessions inside tmux. No tmux, no cdog
-- **macOS notifications only** — interactive and sound notifications use macOS Notification Center. Other platforms fall back to plain notify
+- **macOS notifications only** — interactive and sound notifications use macOS Notification Center. Other platforms fall back to plain notify. **Click-to-open** (`open_on_click`) is cross-platform in command generation, but on Linux it depends on a notification daemon that supports actions (notify-send `-A`) and a working window manager (X11; Wayland is not reliably supported)
 - **Hook-based** — hook scripts must be installed via `cdog init`. Without hooks, auto-nudge and auto-recover do not work. `cdog start` auto-runs `cdog init` if hooks are missing
 - **Watcher subprocesses** — `cdog start` spawns pane watcher + log watcher as detached child processes. Their `tail` children share the watcher's process group, so `cdog stop` / `restart` / `delete` (which signal the whole group) clean them up reliably — no orphan accumulation across restarts. Only a hard crash or `kill -9` of the watcher itself can leave orphans (check `ps aux | grep cdog`)
 - **Log path fallback** — if config doesn't specify `log`, the log watcher falls back to `<cwd>/logs/claude-debug.log`. Both watchers auto-enable when a log file is available
