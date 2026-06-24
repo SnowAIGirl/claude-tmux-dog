@@ -12,7 +12,7 @@ import { tmuxHasSession } from '../util.js';
 import { logAgentEvent } from '../logger.js';
 import { spawnLogWatcher } from '../logwatcher.js';
 import { spawnPaneWatcher } from '../panewatcher.js';
-import { killLogWatcher } from '../logwatcher.js';
+import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 
 /**
@@ -40,6 +40,9 @@ export async function restartCommand(name: string): Promise<void> {
   // Kill any existing watchers (in case they're orphaned)
   killLogWatcher(name);
   killPaneWatcher(name);
+
+  // Clear stale quota nudge — new watcher process will reschedule if needed
+  clearQuotaNudge(name);
 
   // Re-attach cdog monitoring
   mutateAgent(name, (a) => {

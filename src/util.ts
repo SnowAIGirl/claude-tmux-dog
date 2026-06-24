@@ -41,6 +41,8 @@ export function colorClaudeStatus(status: string): string {
       return ANSI.green(status);
     case 'waiting':
       return ANSI.blue(status);
+    case 'pending':
+      return ANSI.yellow(status);
     case 'completed':
       return ANSI.cyan(status);
     case 'failed':

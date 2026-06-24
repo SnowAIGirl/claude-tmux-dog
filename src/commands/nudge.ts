@@ -14,6 +14,7 @@ import { loadState, mutateAgent } from '../state.js';
 import { tmuxHasSession, tmuxSendText } from '../util.js';
 import { loadConfig } from '../config.js';
 import { logAgentEvent } from '../logger.js';
+import { clearQuotaNudge } from '../logwatcher.js';
 
 const DEFAULT_PROMPT = 'continue';
 
@@ -49,6 +50,9 @@ export function nudgeCommand(name: string, text?: string): boolean {
     });
     logAgentEvent(name, `nudge: claude_status was failed → running (session alive, pre-nudge sync)`);
   }
+
+  // Cancel any pending quota nudge — user is nudging manually
+  clearQuotaNudge(name);
 
   const cfg =
     agent.config_path && existsSync(agent.config_path)

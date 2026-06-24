@@ -12,6 +12,7 @@ import { tmuxHasSession, tmuxSendText } from '../util.js';
 import { logAgentEvent } from '../logger.js';
 import { notify, notifyInteractive } from '../notify.js';
 import { findBySession, reloadConfig, resolvePrompt } from './shared.js';
+import { clearQuotaNudge } from '../logwatcher.js';
 
 export async function handleStop(ev: StopEvent): Promise<void> {
   const agent = findBySession(ev.session_id);
@@ -26,6 +27,8 @@ export async function handleStop(ev: StopEvent): Promise<void> {
       a.stop_reason = null;
       a.ended_at = null;
     });
+    // Cancel any pending quota nudge — the agent recovered on its own
+    clearQuotaNudge(agent.name);
   }
 
   const cfg = reloadConfig(agent);

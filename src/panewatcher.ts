@@ -76,7 +76,12 @@ export function spawnPaneWatcher(agent: AgentState): number | null {
 export function killPaneWatcher(agentName: string): void {
   const agent = loadState()[agentName];
   const pid = agent?.pane_watcher_pid;
-  if (pid) { try { process.kill(pid); } catch { /* dead */ } }
+  if (pid) {
+    try {
+      // Kill the whole process group (watcher + tail child) — detached: true
+      process.kill(-pid);
+    } catch { /* dead */ }
+  }
   try { tmux(['pipe-pane', '-t', agent.tmux_session]); } catch { /* ignore */ }
   try { rmSync(pipeFilePath(agentName), { force: true }); } catch { /* ignore */ }
   mutateAgent(agentName, (a) => { a.pane_watcher_pid = null; });
@@ -142,7 +147,7 @@ async function fileHasContent(path: string): Promise<boolean> {
 async function runPipeMode(agentName: string, session: string, pipeFile: string, cfg: ResolvedPaneWatcherConfig): Promise<void> {
   // -n 50: start by reading the last 50 lines so we catch the current token
   // count immediately, instead of waiting for the next TUI redraw.
-  const tail = spawn('tail', ['-f', '-n', '50', pipeFile], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const tail = spawn('tail', ['-f', '-n', '50', pipeFile], { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
 
   let buffer = '';
   let lastTokens: number | null = null;

@@ -5,7 +5,7 @@
 import { loadState, mutateAgent } from '../state.js';
 import { tmuxHasSession } from '../util.js';
 import { logAgentEvent } from '../logger.js';
-import { killLogWatcher } from '../logwatcher.js';
+import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 
 /**
@@ -23,6 +23,7 @@ export async function stopCommand(name: string): Promise<void> {
 
   killLogWatcher(name);
   killPaneWatcher(name);
+  clearQuotaNudge(name);
   mutateAgent(name, (a) => {
     a.cdog_status = 'detached';
   });

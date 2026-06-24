@@ -1,7 +1,7 @@
 // Type definitions for claude-tmux-dog (cdog) — v2
 
 // ---- Claude process status (hook-driven) ----
-export type ClaudeStatus = 'running' | 'waiting' | 'failed' | 'completed' | 'stopped' | 'starting';
+export type ClaudeStatus = 'running' | 'waiting' | 'pending' | 'failed' | 'completed' | 'stopped' | 'starting';
 
 // ---- cdog monitoring status (command-driven) ----
 //   watching: cdog listens to hooks (nudge/recover), does NOT own the process lifetime.

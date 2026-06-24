@@ -12,7 +12,7 @@ A Claude Code process manager and inter-agent message bus. Starts long-running C
 | # | Advantage | Detail |
 |---|-----------|--------|
 | 1 | **Zero-polling** | Claude Code hooks (`Stop` / `StopFailure` / `SessionStart` / `SessionEnd`) push events to cdog. No loop, no timer, no filesystem watcher |
-| 2 | **Dual-track status** | Independent statuses for the Claude process (hook-driven: `running` / `waiting` / `failed` / `completed`) and cdog monitoring (command-driven: `watching` / `detached`). `cdog stop` never kills the process |
+| 2 | **Dual-track status** | Independent statuses for the Claude process (hook-driven: `running` / `waiting` / `pending` / `failed` / `completed`) and cdog monitoring (command-driven: `watching` / `detached`). `cdog stop` never kills the process |
 | 3 | **Auto-nudge** | On every `Stop` hook, auto-send a configurable prompt (e.g. `"continue"`) so the agent keeps working autonomously — like a hands-free loop |
 | 4 | **Auto-recovery** | On recoverable `StopFailure` (rate limit, overloaded, timeout, server error), runs a **cdog-recover** flow: Ctrl-C + `compactOrNudge` (compact if context ≥ 80%, else nudge). Circuit breaker trips after 3 failures in 5 minutes |
 | 5 | **Dual-layer context defense** | **Pane watcher** (proactive): monitors `↑ tokens` in the tmux pane via `pipe-pane`, compacts at 80% before errors happen. **Log watcher** (reactive): tails the claude debug log, classifies API errors by type, triggers compact-or-nudge on threshold. Compact completion detected via `PostCompact` hook — no hardcoded delays |
@@ -149,7 +149,7 @@ Tails the claude debug log for `[ERROR] API error` lines, classifies them, and t
 | `fatal` | `model_not_found`, `authentication_failed`, `billing_error`, `oauth_org_not_allowed` | immediate | **Stop agent** — C-c (marker technique) → mark `failed` → kill tmux → kill watchers → notify |
 | `timeout` | `timed out`, `524`, `TTFB`, `no response headers` | `max(threshold * 2, 6)` | C-c → breakToShell → compact-or-nudge |
 | `provider` | `503`, `upstream error`, `no available channel`, `overloaded_error`, `访问量过大`, `稍后再试` | never | Let claude retry; notify on every error |
-| `rate_limit` | `rate_limit`, `公平使用`, `frequency`, `429` | never | If reset time found (e.g. `AccountQuotaExceeded`): breakToShell + schedule nudge for `reset_time + 30s`. Otherwise: let claude retry |
+| `rate_limit` | `rate_limit`, `公平使用`, `frequency`, `429` | never | If reset time found (e.g. `AccountQuotaExceeded`): breakToShell + mark `pending` + schedule nudge for `reset_time + 30s` (cancelled if the agent recovers first). Otherwise: let claude retry |
 | `unknown` | (unclassified) | `threshold` (default 3) | C-c → breakToShell → compact-or-nudge |
 
 > **Note:** `overloaded_error` in the API response means the *model* is overloaded (provider-side), NOT that the context window is full. A full context window typically shows up as `unknown` + "Request timed out", not as `overloaded_error`.
@@ -227,7 +227,7 @@ The pane watcher also persists `last_up_tokens` to state, which the log watcher 
 
 cdog tracks two independent statuses per agent:
 
-- **claude** (hook-driven): `running` / `waiting` / `failed` / `completed` / `stopped`
+- **claude** (hook-driven): `running` / `waiting` / `pending` / `failed` / `completed` / `stopped`
 - **cdog** (command-driven): `watching` (listen to hooks) / `detached` (ignore all hooks)
 
 `cdog stop` does **not** kill claude — it flips cdog to `detached` so cdog stops nudging/recovering while claude keeps running. `cdog restart` flips back to `watching` without touching the process. `cdog delete` is the only command that actually kills the tmux/claude session.

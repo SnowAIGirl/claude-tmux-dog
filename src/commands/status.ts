@@ -65,7 +65,7 @@ function printTable(): void {
     if (a.fatal_error && claude === 'failed') {
       claudeDisplay = ANSI.red('failed!');
     }
-    const up = claude === 'running' || claude === 'failed' || claude === 'completed'
+    const up = claude === 'running' || claude === 'failed' || claude === 'completed' || claude === 'pending'
       ? uptimeFrom(a.started_at)
       : '–';
     const sess = a.session_id ? a.session_id.slice(0, 8) : '–';

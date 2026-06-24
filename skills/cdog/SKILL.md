@@ -72,7 +72,7 @@ The table shows:
 - **name** — agent name
 - **session** — first 8 chars of session UUID
 - **status** — cdog status (`watching` / `detached`)
-- **claude** — claude process status (`running` / `waiting` / `failed` / `completed` / `stopped` / `failed!`)
+- **claude** — claude process status (`running` / `waiting` / `pending` / `failed` / `completed` / `stopped` / `failed!`)
 - **auto-nudge** — whether auto-nudge is on or off
 - **context** — `↑ tokens / max_tokens pct%` (from pane watcher)
 - **nudge** — nudge count
@@ -168,7 +168,7 @@ cdog tracks **two independent statuses** per agent:
 
 | Track | Values | Driven by |
 | --- | --- | --- |
-| **claude** | `running` / `waiting` / `failed` / `completed` / `stopped` | Hook events |
+| **claude** | `running` / `waiting` / `pending` / `failed` / `completed` / `stopped` | Hook events |
 | **cdog** | `watching` / `detached` | Commands (`stop` / `restart`) |
 
 - `watching` — cdog listens to hooks: auto-nudges on Stop, auto-recovers on recoverable failures
@@ -176,6 +176,8 @@ cdog tracks **two independent statuses** per agent:
 
 `cdog stop` does **not** kill claude — it just flips to `detached`.
 `cdog delete` IS the only command that kills the tmux/claude session.
+
+> **`pending`** (claude) — quota exceeded; cdog broke to shell and is waiting for the quota reset to schedule a nudge. Shown **yellow** in `cdog status`. The scheduled nudge is **cancelled** if the agent recovers first (manual nudge, restart, Stop-hook recovery, Notification).
 
 ## Watchdog Auto-Management
 

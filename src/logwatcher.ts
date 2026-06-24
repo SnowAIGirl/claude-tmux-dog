@@ -263,7 +263,8 @@ export function killLogWatcher(agentName: string): void {
   const pid = agent?.watcher_pid;
   if (!pid) return;
   try {
-    process.kill(pid);
+    // Kill the whole process group (watcher + tail child) — detached: true
+    process.kill(-pid);
   } catch { /* already dead */ }
   mutateAgent(agentName, (a) => {
     a.watcher_pid = null;
@@ -334,9 +335,10 @@ export async function runLogWatcher(agentName: string): Promise<void> {
 
   logAgentEvent(agentName, `logwatcher: started watching ${logPath} (threshold=${threshold}, unknown=${initialUnknown})`);
 
-  // tail -f the log file
+  // tail -f the log file (detached so killLogWatcher can kill the whole group)
   const tail = spawn('tail', ['-f', '-n', '0', logPath], {
     stdio: ['ignore', 'pipe', 'ignore'],
+    detached: true,
   });
 
   let buffer = '';
@@ -436,11 +438,21 @@ export async function runLogWatcher(agentName: string): Promise<void> {
               if (tmuxHasSession(tmuxSession)) {
                 writeWatcherLog(agentName, `quota exceeded, breaking to shell before scheduling nudge`);
                 breakToShell(tmuxSession).then(() => {
+                  // Mark claude as pending (waiting for quota reset)
+                  mutateAgent(agentName, (a) => {
+                    a.claude_status = 'pending';
+                  });
                   scheduleQuotaNudge(agentName, resetTime, trimmed);
                 }).catch(() => {
+                  mutateAgent(agentName, (a) => {
+                    a.claude_status = 'pending';
+                  });
                   scheduleQuotaNudge(agentName, resetTime, trimmed);
                 });
               } else {
+                mutateAgent(agentName, (a) => {
+                  a.claude_status = 'pending';
+                });
                 scheduleQuotaNudge(agentName, resetTime, trimmed);
               }
             }
@@ -531,6 +543,28 @@ async function handleFatalError(agentName: string, errorLine: string): Promise<v
 
 // Track active quota timers per agent to avoid duplicate scheduling
 const quotaTimers = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Cancel a pending quota nudge timer and clear next_nudge_at from state.
+ * Called when the agent recovers (manual nudge, model switch, Stop hook) so
+ * the scheduled nudge doesn't fire redundantly.
+ */
+export function clearQuotaNudge(agentName: string): void {
+  const timer = quotaTimers.get(agentName);
+  if (timer) {
+    clearTimeout(timer);
+    quotaTimers.delete(agentName);
+  }
+  try {
+    mutateAgent(agentName, (a) => {
+      a.next_nudge_at = null;
+      // If claude was pending (waiting for quota), mark it running again
+      if (a.claude_status === 'pending') {
+        a.claude_status = 'running';
+      }
+    });
+  } catch { /* best effort */ }
+}
 
 /**
  * Schedule a nudge after the quota reset time + delay.
@@ -633,8 +667,12 @@ function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: strin
         writeWatcherLog(agentName, `failed to recreate session: ${(e as Error).message}`);
       }
     } else {
-      // tmux session alive — just nudge
+      // tmux session alive — claude is still running (C-c only interrupted it)
+      // just nudge to resume work
       writeWatcherLog(agentName, `quota reset reached, nudging with "${prompt}"`);
+      mutateAgent(agentName, (a) => {
+        a.claude_status = 'running';
+      });
       try { tmuxSendText(tmuxSession, prompt, true); } catch { /* best effort */ }
     }
 
