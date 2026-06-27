@@ -16,16 +16,19 @@ description: Manage Claude Code background agents with cdog (claude-tmux-dog) �
 | --- | --- |
 | `cdog start [config_path]` | Start an agent (default: `./cdog.json`). Auto-runs `cdog init` if hooks missing |
 | `cdog start all` | Start every agent that has a `config_path` recorded |
-| `cdog stop <name\|all>` | Detach cdog (stop watching); **claude keeps running**. Kills watchers |
-| `cdog restart <name\|all>` | Re-watch a detached agent (never kills claude). Respawns watchers |
+| `cdog stop <name\|all>` | Detach cdog + **Esc-abort the in-progress turn** (default; `stop.abort_work`). Claude stays alive (`waiting`) |
+| `cdog drain <name\|all>` | Detach cdog **WITHOUT interrupting** — let the current turn finish, then idle. Graceful counterpart to `stop` |
+| `cdog restart <name\|all>` | Re-watch a detached agent (never kills claude). Respawns watchers; kicks if idle |
 | `cdog delete <name\|all>` | Kill tmux session + remove from state. Kills watchers |
 | `cdog status [name]` | pm2-style table, or detail for one agent |
-| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | Tail logs (default = cdog+claude merged) |
+| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | Tail logs (default = cdog+claude merged). `--err` = last N `[ERROR]` lines across the whole log |
 | `cdog nudge <name\|all> [text]` | Send prompt + Enter to an agent |
 | `cdog compact <name>` | Manually trigger compact-or-nudge: C-c → read tokens → /compact or nudge |
 | `cdog auto-nudge <enable\|disable> <name\|all>` | Toggle auto-nudge in config (persistent) |
+| `cdog prune [name\|all]` | Trim cdog's own op-log to `log_retention` (default 7d) + clean `~/.cdog` housekeeping. Auto-runs on `start` |
 | `cdog message send --to <name> --message <text> [--from F]` | Send a message to an agent |
 | `cdog init` | Install `~/.cdog/` and wire hooks into `~/.claude/settings.json` |
+| `cdog --version` / `cdog -v` | Print version (resolved from package.json) |
 
 ## Common Workflows
 
@@ -156,16 +159,21 @@ Target selection: no name / `all` = every agent; a name = that single agent.
 `--err` keeps only `[ERROR]` lines. `--no-follow` snapshots and exits; `--lines N` sets the count (default 50).
 Timestamps: both cdog and claude write ISO-8601 to disk; `cdog log` reformats them to the agent's configured `timeformat` (default `YYYY-MM-DD HH:mm:ss`) at display time.
 
-### 8. Stop / restart / delete
+### 8. Stop / drain / restart / delete
 
 ```bash
-cdog stop my-agent          # detach cdog — claude keeps running untouched
+cdog stop my-agent          # Esc-abort in-progress turn + detach (default). Claude → waiting, stays alive
+cdog drain my-agent         # detach WITHOUT interrupting — current turn finishes, then idles
 cdog restart my-agent       # re-attach cdog — never kills claude; kicks if idle
 cdog delete my-agent        # kill tmux session + remove from state permanently
 cdog stop all               # stop watching all agents
 ```
 
+**stop vs drain:** both flip cdog to `detached` and kill watchers. `stop` additionally sends **Esc×2 + C-u** to abort whatever claude is doing right now (default, controlled by `stop.abort_work` — set `false` to make `stop` behave like `drain`). `drain` never interrupts — claude finishes its current turn, and when it ends the Stop hook fires and cdog's detached observe path records `waiting`. Neither kills the process; `delete` is the only command that does.
+
 `restart` re-attaches cdog and respawns watchers. If claude died, it relaunches via `--resume` (no nudge — that path re-inits with the task md). If claude is alive but **idle** (`claude_status != running`), restart sends one nudge kick to get it moving; if claude is mid-turn, it leaves it alone.
+
+**Status accuracy:** claude_status is hook-driven — `UserPromptSubmit` → `running` (turn start, incl. cdog nudges), `Stop` → `running`/`waiting`, `StopFailure` → `failed`, `SessionEnd` → `stopped`/`failed`. Even when detached, hooks still flow and cdog records the truth (observe-only) — except interrupts (Esc/C-c), which fire no hook; for its own `stop`, cdog verifies idle via the pane.
 
 ### 9. Init (one-time setup)
 
@@ -185,9 +193,9 @@ cdog tracks **two independent statuses** per agent:
 | **cdog** | `watching` / `detached` | Commands (`stop` / `restart`) |
 
 - `watching` — cdog listens to hooks: auto-nudges on Stop, auto-recovers on recoverable failures
-- `detached` — cdog ignores ALL hook events; claude keeps running untouched in tmux
+- `detached` — cdog is hands-off (no nudge/recover) but still **records** claude_status from hooks (observe-only), so `cdog status` stays truthful
 
-`cdog stop` does **not** kill claude — it just flips to `detached`.
+`cdog stop` flips to `detached` and (by default) Esc-aborts the in-progress turn; `cdog drain` flips to `detached` without interrupting. Neither kills claude.
 `cdog delete` IS the only command that kills the tmux/claude session.
 
 > **`pending`** (claude) — quota exceeded; cdog broke to shell and is waiting for the quota reset to schedule a nudge. Shown **yellow** in `cdog status`. The scheduled nudge is **cancelled** if the agent recovers first (manual nudge, restart, Stop-hook recovery, Notification).
@@ -230,9 +238,11 @@ Both watchers are killed on `cdog stop` / `cdog delete` and respawned on `cdog r
   "log": "./logs/claude-debug.log",     // claude debug log path
   "log_file": "./logs/cdog.log",        // cdog operation log path
   "model": "claude-sonnet-4-6",         // model label (display only)
-  "env": { "KEY": "VALUE" },            // env vars for claude process
+  "env": { "KEY": "VALUE" },            // env vars for claude process (e.g. DISABLE_TELEMETRY=1)
   "timeout": 10000,                     // stop/restart wait ms
   "timeformat": "YYYY-MM-DD HH:mm:ss",  // display timestamp format
+  "log_retention": "7d",                // trim cdog's own op-log to this window on start/prune ("0"/"off" disables)
+  "stop": { "abort_work": true },       // stop sends Esc to abort in-progress turn (default true; false = drain-like)
   "watchdog": {
     "prompt": "continue",               // nudge text (default "continue")
     "per_watch_duration": "7d",          // monitor window; each start/restart resets it; on Stop/SessionEnd when passed → completed (keeps tmux)

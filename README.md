@@ -2,7 +2,11 @@
 
 <p align="center"><img src="assets/avator_dog_500.png" width="500" alt="cdog"></p>
 
+> [![npm version](https://img.shields.io/npm/v/claude-tmux-dog.svg?logo=npm)](https://www.npmjs.com/package/claude-tmux-dog)
+> [![npm downloads](https://img.shields.io/npm/dm/claude-tmux-dog.svg?logo=npm)](https://www.npmjs.com/package/claude-tmux-dog)
+> [![license](https://img.shields.io/npm/l/claude-tmux-dog.svg)](https://github.com/SnowAIGirl/claude-tmux-dog/blob/main/LICENSE)
 > [![GitHub](https://img.shields.io/badge/GitHub-SnowAIGirl%2Fclaude--tmux--dog-blue?logo=github)](https://github.com/SnowAIGirl/claude-tmux-dog)
+>
 > English | [中文](README_CN.md)
 
 **24/7 unattended Claude agents + tmux-native message bus.**
@@ -118,7 +122,7 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 4. **Dual-layer watchers**:
    - **Pane watcher** (proactive): monitors `↑ tokens`, compacts at 80%
    - **Log watcher** (reactive): tails debug log, triggers recovery on API error threshold
-5. **`cdog stop`** does NOT kill claude — it flips cdog to `detached` (ignores hooks). **`cdog delete`** is the only command that kills the tmux session
+5. **`cdog stop`** flips cdog to `detached` and (by default) Esc-aborts the in-progress turn; **`cdog drain`** detaches without interrupting. Neither kills claude — detached cdog still records status from hooks (observe-only). **`cdog delete`** is the only command that kills the tmux session
 
 ---
 
@@ -301,25 +305,28 @@ This prevents C-c from killing the wrong process.
 | Command | Description |
 |---------|-------------|
 | `cdog start [config\|all]` | Start agent(s). Auto-runs `cdog init` if hooks missing |
-| `cdog stop <name\|all>` | Detach cdog (claude keeps running). Kills watchers |
-| `cdog restart <name\|all>` | Re-watch detached agent. Respawns watchers |
+| `cdog stop <name\|all>` | Detach cdog + Esc-abort in-progress turn (default). Claude → `waiting`, stays alive |
+| `cdog drain <name\|all>` | Detach cdog **without interrupting** — current turn finishes, then idles |
+| `cdog restart <name\|all>` | Re-watch detached agent. Respawns watchers; kicks if idle |
 | `cdog delete <name\|all>` | Kill tmux session + remove from state |
 | `cdog status [name]` | pm2-style table or detail view |
-| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | Tail logs |
+| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | Tail logs. `--err` = last N `[ERROR]` lines across whole log |
 | `cdog message send --to <name> --message <text> [--from F] [--reply-method R]` | Send message to agent |
 | `cdog nudge <name\|all> [text]` | Send prompt + Enter |
 | `cdog compact <name>` | Manually trigger compact-or-nudge |
 | `cdog auto-nudge <enable\|disable> <name\|all>` | Toggle auto-nudge (persistent) |
+| `cdog prune [name\|all]` | Trim cdog's own op-log to `log_retention` (default 7d) + clean `~/.cdog`. Auto-runs on `start` |
 | `cdog init` | Install hooks into `~/.claude/settings.json` |
+| `cdog --version` / `-v` | Print version |
 
 ### Dual-Track Status
 
 cdog tracks two independent statuses:
 
-- **claude** (hook-driven): `running` / `waiting` / `pending` / `failed` / `completed` / `stopped`
+- **claude** (hook-driven): `running` / `waiting` / `pending` / `failed` / `completed` / `stopped` — `UserPromptSubmit`→`running` (turn start), `Stop`→`running`/`waiting`, `StopFailure`→`failed`, `SessionEnd`→`stopped`/`failed`
 - **cdog** (command-driven): `watching` / `detached`
 
-`cdog stop` flips to `detached` (ignores hooks). `cdog delete` kills tmux.
+`watching` = cdog auto-nudges/recovers. `detached` = hands-off (no nudge/recover) but still records claude status from hooks (observe-only). `cdog stop`/`drain` → detached; `cdog delete` kills tmux.
 
 ---
 

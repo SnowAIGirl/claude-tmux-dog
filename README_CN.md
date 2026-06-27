@@ -2,6 +2,11 @@
 
 <p align="center"><img src="assets/avator_dog_500.png" width="500" alt="cdog"></p>
 
+> [![npm version](https://img.shields.io/npm/v/claude-tmux-dog.svg?logo=npm)](https://www.npmjs.com/package/claude-tmux-dog)
+> [![npm downloads](https://img.shields.io/npm/dm/claude-tmux-dog.svg?logo=npm)](https://www.npmjs.com/package/claude-tmux-dog)
+> [![license](https://img.shields.io/npm/l/claude-tmux-dog.svg)](https://github.com/SnowAIGirl/claude-tmux-dog/blob/main/LICENSE)
+> [![GitHub](https://img.shields.io/badge/GitHub-SnowAIGirl%2Fclaude--tmux--dog-blue?logo=github)](https://github.com/SnowAIGirl/claude-tmux-dog)
+>
 > [English](README.md) | 中文版
 
 **7×24 无人值守的 Claude agent + tmux 原生消息总线。**
@@ -117,7 +122,7 @@ cdog log
 4. **双层 watcher**:
    - **Pane watcher**(主动):监控 `↑ tokens`,80% 时压缩
    - **Log watcher**(被动):tail 调试日志,API 错误达阈值时触发恢复
-5. **`cdog stop`** 不杀 claude——它把 cdog 切换为 `detached`(忽略 hook)。只有 **`cdog delete`** 才杀 tmux 会话
+5. **`cdog stop`** 切换为 `detached` 并(默认)Esc 中断进行中的那轮;**`cdog drain`** 分离但不打断。两者都不杀 claude——detached 时 cdog 仍记录状态(observe-only)。只有 **`cdog delete`** 才杀 tmux 会话
 
 ---
 
@@ -300,25 +305,28 @@ PostCompact 触发 → 发送 prompt 续推
 | 命令 | 说明 |
 |------|------|
 | `cdog start [config\|all]` | 启动 agent。缺少 hook 时自动 `cdog init` |
-| `cdog stop <name\|all>` | 分离 cdog(claude 继续运行)。杀 watcher |
-| `cdog restart <name\|all>` | 恢复监控已分离的 agent。重启 watcher |
+| `cdog stop <name\|all>` | 分离 cdog + Esc 中断进行中的那轮(默认)。claude → `waiting`,进程留活 |
+| `cdog drain <name\|all>` | 分离 cdog **但不打断**——当前那轮跑完即停 |
+| `cdog restart <name\|all>` | 恢复监控已分离的 agent。重启 watcher;idle 则踢一脚 |
 | `cdog delete <name\|all>` | 杀 tmux 会话 + 从 state 移除 |
 | `cdog status [name]` | pm2 风格表格或详情 |
-| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | 查看日志 |
+| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | 查看日志。`--err` = 全日志最后 N 条 `[ERROR]` |
 | `cdog message send --to <name> --message <text> [--from F] [--reply-method R]` | 向 agent 发消息 |
 | `cdog nudge <name\|all> [text]` | 发送 prompt + Enter |
 | `cdog compact <name>` | 手动触发 compact-or-nudge |
 | `cdog auto-nudge <enable\|disable> <name\|all>` | 开关自动续推(持久化) |
+| `cdog prune [name\|all]` | 把 cdog 自己的 op-log 裁到 `log_retention`(默认 7d)+ 清 `~/.cdog`。`start` 时自动跑 |
 | `cdog init` | 把 hook 写入 `~/.claude/settings.json` |
+| `cdog --version` / `-v` | 打印版本 |
 
 ### 状态双轨制
 
 cdog 跟踪两种独立状态:
 
-- **claude**(hook 驱动):`running` / `waiting` / `pending` / `failed` / `completed` / `stopped`
+- **claude**(hook 驱动):`running` / `waiting` / `pending` / `failed` / `completed` / `stopped` —— `UserPromptSubmit`→`running`(turn 开始)、`Stop`→`running`/`waiting`、`StopFailure`→`failed`、`SessionEnd`→`stopped`/`failed`
 - **cdog**(命令驱动):`watching` / `detached`
 
-`cdog stop` 切换为 `detached`(忽略 hook)。`cdog delete` 杀 tmux。
+`watching` = cdog 自动续推/恢复。`detached` = 不动手(不续推/恢复),但仍记录 claude 状态(observe-only)。`cdog stop`/`drain` → detached;`cdog delete` 杀 tmux。
 
 ---
 
