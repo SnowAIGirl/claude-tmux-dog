@@ -173,7 +173,7 @@ export function parsePaneTokens(paneContent: string): { upTokens: number | null 
 /**
  * Is claude actively working right now, inferred from the pane?
  *
- * Claude's TUI shows a live spinner line while working:
+ * Claude's TUI shows a live status line while working:
  *   ✻ Incubating… (1m 47s · ↓ 2.0k tokens)   ← verb + ellipsis + (timer) = WORKING
  *   ✻ Cogitated for 1m 54s                    ← past-tense "for" = IDLE
  *
@@ -182,11 +182,17 @@ export function parsePaneTokens(paneContent: string): { upTokens: number | null 
  * Esc/C-c interrupt fires NO status hook — cdog must inspect the pane to tell
  * working from idle when verifying its own interrupt (cdog stop).
  *
- * Working = a ✻ spinner line containing an ellipsis (…) — the in-progress form.
+ * Robustness: claude ROTATES the spinner char (✻/✶/✳/✺…), so we must NOT pin
+ * a single char. Two independent signals, either ⇒ working:
+ *   1. "… (" — ellipsis followed by a parenthesised live timer. Format-stable
+ *      across spinner-char rotation and minor wording changes (primary).
+ *   2. Any known spinner char followed by … (covers the brief moment before
+ *      the timer renders).
  */
-const WORKING_SPINNER_RE = /✻[^\n]*…/;
+const WORKING_TIMER_RE = /…\s*\(/;
+const WORKING_SPINNER_RE = /[✻✶✳✺✦❋✸✷][^\n]*…/;
 export function isClaudeWorking(paneContent: string): boolean {
-  return WORKING_SPINNER_RE.test(paneContent);
+  return WORKING_TIMER_RE.test(paneContent) || WORKING_SPINNER_RE.test(paneContent);
 }
 
 /** Capture the pane and return whether claude is currently working. */
