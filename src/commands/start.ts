@@ -20,6 +20,7 @@ import { logAndEcho, startedLine } from '../logger.js';
 import { notify } from '../notify.js';
 import { spawnLogWatcher, killLogWatcher } from '../logwatcher.js';
 import { spawnPaneWatcher, killPaneWatcher } from '../panewatcher.js';
+import { pruneAgent } from './prune.js';
 
 /** Pick a tmux session name that isn't already in use, with `-1`, `-2` suffixes. */
 function uniqueTmuxSession(base: string): string {
@@ -102,6 +103,14 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
   // quota exceeded at startup) without missing any lines.
   const watchMs = parseDuration(cfg.watchdog?.per_watch_duration);
   const watchDeadline = watchMs > 0 ? Date.now() + watchMs : null;
+
+  // Trim this agent's cdog op-log to log_retention (default 7d) on each start.
+  // Only cdog's own log — claude's debug log is left to claude.
+  try {
+    pruneAgent(cfg.name);
+  } catch {
+    /* best effort — don't block start */
+  }
 
   // Kill any leftover watcher processes from a previous run before overwriting state.
   // Must happen BEFORE upsertAgent, otherwise the old watcher_pid in state is lost
