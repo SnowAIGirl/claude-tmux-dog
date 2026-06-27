@@ -82,7 +82,15 @@ describe('recovery.ts', () => {
       expect(isClaudeWorking('✻ Incubating… (1m 47s · ↓ 2.0k tokens)')).toBe(true);
       expect(isClaudeWorking('✻ Jitterbugging… (32m 26s · ↑ 24.6k tokens)')).toBe(true);
     });
-    it('false when idle (past-tense, no ellipsis)', () => {
+    it('true even when the spinner char has rotated (not pinned to ✻)', () => {
+      expect(isClaudeWorking('✶ Incubating… (20s · ↓ 1.0k tokens)')).toBe(true);
+      expect(isClaudeWorking('✳ Working… (5m)')).toBe(true);
+      expect(isClaudeWorking('✺ Pondering… (3s)')).toBe(true);
+    });
+    it('true via spinner+ellipsis even without a parenthesised timer', () => {
+      expect(isClaudeWorking('✻ Incubating…')).toBe(true);
+    });
+    it('false when idle (past-tense, no ellipsis+timer)', () => {
       expect(isClaudeWorking('✻ Cogitated for 1m 54s')).toBe(false);
       expect(isClaudeWorking('❯')).toBe(false);
       expect(isClaudeWorking('')).toBe(false);

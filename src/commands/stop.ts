@@ -148,7 +148,10 @@ export async function stopCommand(name: string): Promise<void> {
 async function waitForIdle(session: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isClaudeWorking(tmuxCapturePane(session, 30))) return true;
+    // 50 lines: the status line is pinned at the bottom of claude's TUI (not
+    // in scrollback), so it's always in the last few lines regardless of output
+    // length; 50 matches parsePaneTokens and gives comfortable margin.
+    if (!isClaudeWorking(tmuxCapturePane(session, 50))) return true;
     await sleep(300);
   }
   return false;
