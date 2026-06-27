@@ -22,9 +22,9 @@ import { homedir } from 'node:os';
 import type { AgentState, CdogConfig, PaneWatcherConfig } from './types.js';
 import { loadState, mutateAgent } from './state.js';
 import { loadConfig } from './config.js';
-import { tmuxHasSession, tmux, sleep, tmuxCapturePane, parseTokenCount } from './util.js';
+import { tmuxHasSession, tmux, tmuxChecked, sleep, tmuxCapturePane, parseTokenCount } from './util.js';
 import { parsePaneTokens } from './recovery.js';
-import { logAgentEvent } from './logger.js';
+import { logAgentEvent, logSwallow } from './logger.js';
 import { notify } from './notify.js';
 
 // ---- Defaults ----
@@ -264,7 +264,19 @@ function handleTokens(
 
   // /compact already armed above (compact_in_progress=true). PostCompact hook
   // will fire when it's done → sends nudge. tmux send-keys here initiates it.
-  tmux(['send-keys', '-t', session, '/compact', 'C-m']);
+  try {
+    tmuxChecked(['send-keys', '-t', session, '/compact', 'C-m']);
+  } catch (e) {
+    // /compact never landed — clear the armed flag so we're not stuck waiting
+    // for a PostCompact that will never fire (the next cycle can retry).
+    logSwallow(agentName, 'pane-watcher /compact send', e);
+    mutateAgent(agentName, (a) => {
+      a.compact_in_progress = false;
+      a.compact_sent_at = null;
+      a.compact_pending_prompt = null;
+    });
+    return;
+  }
   logAgentEvent(agentName, `pane-watcher: /compact sent (waiting for PostCompact hook to nudge)`);
 
   notify(agentName, 'circuit-breaker', agentName,

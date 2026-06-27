@@ -137,6 +137,16 @@ export function tmux(args: string[]): string {
   return run('tmux', args);
 }
 
+/**
+ * Run a tmux subcommand, THROWING on failure (non-zero exit / tmux missing).
+ * Use for critical control sends (Esc, /compact, nudge) where a silent failure
+ * means cdog quietly stops doing its job — wrap at the call site with logSwallow.
+ * Prefer tmux() for read-only/best-effort calls where '' is an acceptable result.
+ */
+export function tmuxChecked(args: string[]): void {
+  execFileSync('tmux', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
 /** Does a tmux session exist? */
 export function tmuxHasSession(session: string): boolean {
   try {
