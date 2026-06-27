@@ -139,12 +139,8 @@ export async function restartCommand(name: string): Promise<void> {
       kicked = true;
       mutateAgent(name, (a) => {
         a.nudge_count = (a.nudge_count ?? 0) + 1;
-        // We just told claude to work — mark it running now, mirroring `cdog
-        // nudge`. Without this, status stays 'waiting' until the turn ends and
-        // the Stop hook fires, which looks like the kick did nothing.
-        a.claude_status = 'running';
-        a.stop_reason = null;
-        a.ended_at = null;
+        // Don't manually set claude_status here — the UserPromptSubmit hook
+        // fires when claude receives the nudge and sets 'running' truthfully.
       });
       logAgentEvent(name, `restart: claude was idle (status=${agent.claude_status}), kicked ("${prompt}")`);
       console.log(`↩ ${name}: was idle, kicked ("${prompt}")`);

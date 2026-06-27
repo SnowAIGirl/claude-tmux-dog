@@ -59,6 +59,19 @@ export async function notifyCommand(argJson?: string): Promise<void> {
     case 'PostCompact':
       await handlePostCompact(ev);
       break;
+    case 'UserPromptSubmit': {
+      // Turn START signal: claude begins working on a prompt (incl. cdog
+      // nudges). Mark running immediately — the watching-mode Stop handler
+      // only fires at turn end, so without this a freshly-nudged idle agent
+      // would show a stale status until its first turn completes.
+      const a = findBySession(ev.session_id);
+      if (a) {
+        mutateAgent(a.name, (s) => {
+          s.claude_status = 'running';
+        });
+      }
+      break;
+    }
     default:
       break;
   }
