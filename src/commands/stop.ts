@@ -10,9 +10,9 @@
 
 import { existsSync } from 'node:fs';
 import { loadState, mutateAgent } from '../state.js';
-import { tmuxHasSession, tmuxSendKey } from '../util.js';
+import { tmuxHasSession, tmuxChecked } from '../util.js';
 import { loadConfig } from '../config.js';
-import { logAgentEvent } from '../logger.js';
+import { logAgentEvent, logSwallow } from '../logger.js';
 import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 import type { AgentState, ClaudeStatus } from '../types.js';
@@ -69,13 +69,19 @@ export async function stopCommand(name: string): Promise<void> {
 
   // Watchers are now dead, so no auto-nudge can race with the Esc below.
   const session = agent.tmux_session;
-  const aborted = decideAbort({
+  let aborted = decideAbort({
     abortWork: shouldAbortWork(agent),
     status: agent.claude_status,
     sessionAlive: tmuxHasSession(session),
   });
   if (aborted) {
-    tmuxSendKey(session, 'Escape');
+    try {
+      tmuxChecked(['send-keys', '-t', session, 'Escape']);
+    } catch (e) {
+      // Esc didn't land — claude is still working, so don't claim 'waiting'.
+      logSwallow(name, 'stop abort (Esc)', e);
+      aborted = false;
+    }
   }
 
   mutateAgent(name, (a) => {

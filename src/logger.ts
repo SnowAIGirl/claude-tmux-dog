@@ -52,16 +52,37 @@ export function logAndEcho(name: string, message: string): void {
 /**
  * Mark a tmux session gone (status corrections). Convenience wrapper that also
  * logs. Kept here for cohesion; the actual status write is in state.
+ *
+ * Corrects any non-terminal claude_status to 'stopped' when the session is
+ * confirmed gone — not just 'running'. Previously a session that died while
+ * claude was pending/starting/waiting would be left in a stale non-terminal
+ * status, making `cdog status` lie about a dead process.
  */
 export function markDead(name: string): void {
+  const TERMINAL = new Set(['stopped', 'failed', 'completed']);
   mutateAgent(name, (a) => {
-    if (a.claude_status === 'running') {
+    if (!TERMINAL.has(a.claude_status)) {
       a.claude_status = 'stopped';
       a.stop_reason = 'stopped';
       a.ended_at = a.ended_at ?? new Date().toISOString();
     }
   });
   logAgentEvent(name, 'tmux session gone');
+}
+
+/**
+ * Log a swallowed error on a critical path so it isn't silently lost. Use for
+ * control-path operations whose failure means cdog quietly stopped doing its
+ * job (e.g. sending a nudge/Esc/compact). Do NOT use for best-effort cleanup
+ * (process.kill on a dead pid, unlink of a missing temp file) — those are
+ * expected and logging them would just be noise.
+ */
+export function logSwallow(name: string, context: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  logAgentEvent(name, `${context} failed (swallowed): ${msg}`);
+  try {
+    process.stderr.write(`${namePrefix(name)} | ${context} failed (swallowed): ${msg}\n`);
+  } catch { /* ignore */ }
 }
 
 /** Human summary of an AgentState for the operation log. */
