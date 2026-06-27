@@ -22,7 +22,7 @@
 import { existsSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadState } from '../state.js';
-import { formatTime, DEFAULT_TIMEFORMAT } from '../util.js';
+import { formatTime, DEFAULT_TIMEFORMAT, shellQuote } from '../util.js';
 
 // Colors for agent names — cycle through these for multi-agent output
 const AGENT_COLORS = [
@@ -320,7 +320,12 @@ function tailSources(sources: LogSource[], lines: number, follow: boolean, errOn
   };
 
   for (const src of sources) {
-    const child = spawn('tail', ['-n', String(lines), src.path], { stdio: ['ignore', 'pipe', 'inherit'] });
+    // Snapshot: with --err, grep FIRST then tail -n N, so the user gets the
+    // last N errors (not "errors among the last N lines", which yields few/no
+    // matches when errors are sparse). Without --err, plain `tail -n N`.
+    const child = errOnly
+      ? spawn('sh', ['-c', `grep -F ${shellQuote('[ERROR]')} ${shellQuote(src.path)} | tail -n ${lines}`], { stdio: ['ignore', 'pipe', 'inherit'] })
+      : spawn('tail', ['-n', String(lines), src.path], { stdio: ['ignore', 'pipe', 'inherit'] });
     let buf = '';
     child.stdout!.on('data', (chunk: Buffer) => {
       buf += chunk.toString();
