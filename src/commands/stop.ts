@@ -10,7 +10,7 @@
 
 import { existsSync } from 'node:fs';
 import { loadState, mutateAgent } from '../state.js';
-import { tmuxHasSession, tmuxChecked } from '../util.js';
+import { tmuxHasSession, tmuxChecked, sleep } from '../util.js';
 import { loadConfig } from '../config.js';
 import { logAgentEvent, logSwallow } from '../logger.js';
 import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
@@ -65,8 +65,11 @@ export function decideAbort(opts: {
  * (observe-only status recording still happens — see hooks/observe.ts).
  * Also kills the log watcher subprocess (it will be respawned on `cdog restart`).
  *
- * With stop.abort_work enabled and claude actively working, sends one Esc to
- * abort the current turn first (claude_status → 'waiting'); process stays alive.
+ * With stop.abort_work enabled and claude actively working, sends Esc to abort
+ * the current turn. The process stays alive; claude_status is NOT set here —
+ * the truthful Stop hook (detached observe path) flips it to 'waiting' once
+ * claude actually goes idle, so a failed Esc leaves status at 'running' and a
+ * repeated `cdog stop` will retry.
  */
 export async function stopCommand(name: string): Promise<void> {
   const state = loadState();
@@ -82,36 +85,40 @@ export async function stopCommand(name: string): Promise<void> {
 
   // Watchers are now dead, so no auto-nudge can race with the Esc below.
   const session = agent.tmux_session;
-  let aborted = decideAbort({
+  const aborted = decideAbort({
     abortWork: shouldAbortWork(agent),
     status: agent.claude_status,
     sessionAlive: tmuxHasSession(session),
   });
   if (aborted) {
+    // Send Esc twice with a short gap: a single Esc can land mid-tool-execution
+    // and get consumed; the second catches claude at a turn boundary. Esc on an
+    // idle prompt is harmless, so over-sending is safe. Do NOT set claude_status
+    // here — let the Stop hook report the truthful 'waiting' once claude idles,
+    // so a failed Esc (status stays 'running') stays retryable.
     try {
       tmuxChecked(['send-keys', '-t', session, 'Escape']);
+      await sleep(200);
+      tmuxChecked(['send-keys', '-t', session, 'Escape']);
     } catch (e) {
-      // Esc didn't land — claude is still working, so don't claim 'waiting'.
       logSwallow(name, 'stop abort (Esc)', e);
-      aborted = false;
     }
   }
 
   mutateAgent(name, (a) => {
     a.cdog_status = 'detached';
-    if (aborted) a.claude_status = 'waiting';
   });
 
   logAgentEvent(
     name,
     aborted
-      ? 'detached + aborted in-progress turn (Esc); claude left alive (waiting)'
+      ? 'detached + aborted in-progress turn (Esc×2); claude left alive (waiting reported by Stop hook)'
       : 'detached (cdog stopped watching, claude left running)',
   );
 
   const alive = tmuxHasSession(session);
   const tail = aborted
-    ? ` — in-progress turn aborted (Esc), claude suspended (waiting)${alive ? ` in ${session}` : ''}`
+    ? ` — in-progress turn aborted (Esc×2); claude idles to 'waiting' once the turn ends${alive ? ` in ${session}` : ''}`
     : ` — cdog no longer watching${alive ? ` (claude still running in ${session})` : ''}`;
   console.log(`✓ ${name} detached${tail}`);
 }
