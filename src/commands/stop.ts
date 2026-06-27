@@ -101,13 +101,16 @@ export async function stopCommand(name: string): Promise<void> {
   if (wantAbort) {
     // Esc×2 (200ms gap): a single Esc can land mid-tool and get consumed; the
     // second catches claude at a turn boundary. Esc on an idle prompt is
-    // harmless, so over-sending is safe.
+    // harmless, so over-sending is safe. Then C-u to clear the input box so a
+    // later `cdog restart` kick writes into a clean prompt (otherwise leftover
+    // text — e.g. from a nudge that didn't submit — can block the next kick).
     try {
       tmuxChecked(['send-keys', '-t', session, 'Escape']);
       await sleep(200);
       tmuxChecked(['send-keys', '-t', session, 'Escape']);
+      tmuxChecked(['send-keys', '-t', session, 'C-u']);
     } catch (e) {
-      logSwallow(name, 'stop abort (Esc)', e);
+      logSwallow(name, 'stop abort (Esc/C-u)', e);
     }
     // VERIFY via the pane — NOT a hook. Per the Claude Code hooks reference,
     // the Stop hook "Does not run if the stoppage occurred due to a user

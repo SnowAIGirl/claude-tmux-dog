@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { startCommand, startAll } from './commands/start.js';
 import { stopCommand, stopAll } from './commands/stop.js';
+import { drainCommand, drainAll } from './commands/drain.js';
 import { restartCommand, restartAll } from './commands/restart.js';
 import { statusCommand } from './commands/status.js';
 import { logCommand } from './commands/log.js';
@@ -39,7 +40,8 @@ function usage(): never {
 Usage:
   cdog start [config_path]              Start an agent (default: ./cdog.json)
   cdog start all                        Start every agent that has a config_path
-  cdog stop <name|all>                  Detach cdog (stop watching); claude keeps running
+  cdog stop <name|all>                  Detach cdog + abort in-progress turn (Esc); claude stays alive
+  cdog drain <name|all>                 Detach cdog WITHOUT interrupting; let current turn finish, then idle
   cdog restart <name|all>              Re-watch a detached agent (never kills claude)
   cdog delete <name|all>                Kill tmux session (if any) + remove from state
   cdog status [name]                    pm2-style table, or detail for one
@@ -123,6 +125,13 @@ async function main(): Promise<void> {
       if (!name) usage();
       if (name === ALL_KEYWORD) await stopAll();
       else await stopCommand(name);
+      break;
+    }
+    case 'drain': {
+      const name = rest[0];
+      if (!name) usage();
+      if (name === ALL_KEYWORD) await drainAll();
+      else await drainCommand(name);
       break;
     }
     case 'restart': {

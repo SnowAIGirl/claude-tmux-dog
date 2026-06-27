@@ -14,7 +14,6 @@ import {
   unlinkSync,
   renameSync,
   writeSync,
-  fsyncSync,
   appendFileSync,
 } from 'node:fs';
 import type { AgentState, StateMap } from './types.js';
@@ -156,10 +155,17 @@ function backupCorruptState(raw: string): void {
 
 /**
  * Persist the full state map atomically: write to a temp file in the same
- * directory, fsync, then rename over the target. POSIX rename is atomic, so a
- * crash mid-write can never leave a half-written state.json — readers always
- * see either the old or the complete new file. Temp name carries the pid as
+ * directory, then rename over the target. POSIX rename is atomic, so a crash
+ * mid-write can never leave a half-written state.json — readers always see
+ * either the old or the complete new file. Temp name carries the pid as
  * belt-and-suspenders against any path that bypasses the lock. No locking.
+ *
+ * fsync is intentionally omitted: it was the per-write bottleneck (~4-5ms each,
+ * felt as sluggishness on busy agents that write state on every token change /
+ * turn). Atomicity (the property that prevents half-written state on crash)
+ * comes from rename, not fsync — fsync only adds power-loss durability, and
+ * state.json is reconstructable (each agent stores config_path; `cdog start all`
+ * rebuilds) and protected by loadStateRaw's corrupt-backup. No locking.
  */
 function saveStateRaw(state: StateMap): void {
   ensureCdogDir();
@@ -169,7 +175,6 @@ function saveStateRaw(state: StateMap): void {
   try {
     fd = openSync(tmp, 'wx'); // O_EXCL: fail if a stale temp exists
     writeSync(fd, json);
-    fsyncSync(fd);
     closeSync(fd);
     fd = null;
     renameSync(tmp, STATE_PATH); // atomic replace
