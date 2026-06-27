@@ -8,6 +8,7 @@ import type { HookEvent } from '../types.js';
 import { mutateAgent } from '../state.js';
 import { logAgentEvent } from '../logger.js';
 import { readEvent, findBySession } from './shared.js';
+import { observeDetached } from './observe.js';
 import { handleStop } from './stop.js';
 import { handleStopFailure } from './stop-failure.js';
 import { handleSessionEnd } from './session-end.js';
@@ -19,6 +20,15 @@ export { readEvent };
 export async function notifyCommand(argJson?: string): Promise<void> {
   const ev = readEvent(argJson);
   if (!ev || !ev.hook_event_name || !ev.session_id) return;
+
+  // Detached agents: observe-only. Hooks still fire (Claude Code always invokes
+  // them), so record the truthful claude_status, but never act — no nudge, no
+  // recover, no notify, no watcher/kill. Single chokepoint covering all events.
+  const agent = findBySession(ev.session_id);
+  if (agent && agent.cdog_status === 'detached') {
+    observeDetached(agent, ev);
+    return;
+  }
 
   switch (ev.hook_event_name) {
     case 'Stop':
