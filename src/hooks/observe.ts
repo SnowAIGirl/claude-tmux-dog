@@ -54,6 +54,14 @@ export function observeDetached(agent: AgentState, ev: HookEvent): void {
       logAgentEvent(name, 'SessionStart (detached) → running observed; no action (hands-off)');
       break;
 
+    case 'UserPromptSubmit':
+      // A prompt was submitted (turn starting) — claude is working, even though
+      // cdog is detached. Record the truth; don't act on it.
+      mutateAgent(name, (a) => {
+        a.claude_status = 'running';
+      });
+      break;
+
     case 'SessionEnd': {
       // compact/resume are not real exits — claude continues underneath.
       const reason = ev.reason ?? '';

@@ -61,6 +61,18 @@ describe('hook dispatch — detached observe-only (WS-B)', () => {
     expect(agent().nudge_count).toBe(0); // no nudge fired
   });
 
+  it('UserPromptSubmit (detached) → running observed, no action', async () => {
+    saveState({ 'detached-agent': makeDetached({ claude_status: 'waiting' }) });
+    await notifyCommand(ev({ session_id: SID, hook_event_name: 'UserPromptSubmit', prompt: 'continue' }));
+    expect(agent().claude_status).toBe('running');
+  });
+
+  it('UserPromptSubmit (watching) → running (turn-start signal)', async () => {
+    saveState({ 'detached-agent': makeDetached({ cdog_status: 'watching', claude_status: 'waiting' }) });
+    await notifyCommand(ev({ session_id: SID, hook_event_name: 'UserPromptSubmit', prompt: 'go' }));
+    expect(agent().claude_status).toBe('running');
+  });
+
   it('SessionStart → running observed', async () => {
     saveState({ 'detached-agent': makeDetached({ claude_status: 'waiting' }) });
     await notifyCommand(ev({ session_id: SID, hook_event_name: 'SessionStart' }));

@@ -48,7 +48,8 @@ export function hooksConfigured(): boolean {
       Array.isArray(hooks.SessionStart) &&
       Array.isArray(hooks.SessionEnd) &&
       Array.isArray(hooks.PreCompact) &&
-      Array.isArray(hooks.PostCompact)
+      Array.isArray(hooks.PostCompact) &&
+      Array.isArray(hooks.UserPromptSubmit)
     );
   } catch {
     return false;
@@ -122,6 +123,7 @@ export function mergeHookSettings(): boolean {
   hooks.SessionEnd = block('cdog-hook.sh');
   hooks.PreCompact = block('cdog-hook.sh');
   hooks.PostCompact = block('cdog-hook.sh');
+  hooks.UserPromptSubmit = block('cdog-hook.sh');
   settings.hooks = hooks;
 
   try {

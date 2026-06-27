@@ -296,7 +296,7 @@ export type StateMap = Record<string, AgentState>;
 
 // ---- Hook event payloads (stdin JSON from Claude Code hooks) ----
 
-export type HookEventName = 'Stop' | 'StopFailure' | 'SessionStart' | 'SessionEnd' | 'PreCompact' | 'PostCompact';
+export type HookEventName = 'Stop' | 'StopFailure' | 'SessionStart' | 'SessionEnd' | 'PreCompact' | 'PostCompact' | 'UserPromptSubmit';
 
 /** Claude Code `Stop` hook — fires when the agent finishes a turn. */
 export interface StopEvent {
@@ -341,10 +341,25 @@ export interface PostCompactEvent {
   compact_summary?: string;
 }
 
+/**
+ * Claude Code `UserPromptSubmit` hook — fires when a prompt is submitted
+ * (turn START signal). Used to set claude_status='running' the moment claude
+ * begins working on a prompt (including cdog-injected nudges), instead of
+ * waiting for the turn to end (Stop hook). cdog's handler exits 0 (no prompt
+ * modification / no blocking).
+ */
+export interface UserPromptSubmitEvent {
+  session_id: string;
+  hook_event_name: 'UserPromptSubmit';
+  cwd?: string;
+  prompt?: string;
+}
+
 export type HookEvent =
   | StopEvent
   | StopFailureEvent
   | SessionStartEvent
   | SessionEndEvent
   | PreCompactEvent
-  | PostCompactEvent;
+  | PostCompactEvent
+  | UserPromptSubmitEvent;
