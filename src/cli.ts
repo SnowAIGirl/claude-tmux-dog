@@ -15,9 +15,11 @@ import { deleteCommand, deleteAll } from './commands/delete.js';
 import { nudgeDispatch } from './commands/nudge.js';
 import { compactCommand } from './commands/compact.js';
 import { autoNudgeCommand } from './commands/auto-nudge.js';
+import { pruneCommand } from './commands/prune.js';
 import { runLogWatcher, recoverFromApiErrors } from './logwatcher.js';
 import { runPaneWatcher } from './panewatcher.js';
 import { ALL_KEYWORD } from './types.js';
+import { showCachedUpdateHint, refreshUpdateCheck } from './update-check.js';
 
 /** Resolved at startup from the nearest package.json (no hardcoded version). */
 export const VERSION: string = (() => {
@@ -56,6 +58,7 @@ Usage:
                                         Text defaults to config.prompt or "continue".
   cdog compact <name>                   Compact agent context: C-c → read tokens → /compact or nudge
   cdog auto-nudge <enable|disable> <name|all>  Toggle auto-nudge in config (persistent)
+  cdog prune [name|all]                 Trim cdog's own logs + ~/.cdog housekeeping to log_retention (default 7d)
   cdog notify [json]                    Internal: process a hook event (stdin or arg)
   cdog init                             Install ~/.cdog/ and wire hooks into ~/.claude
   cdog --version | -v                   Show version
@@ -111,8 +114,21 @@ function parseArgs(
 async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
 
+  // Update check: instant cached hint on every user command; the network
+  // refresh only runs on start/restart/init (see those cases). Skip internal
+  // hot paths entirely.
+  if (cmd && !cmd.startsWith('__') && cmd !== 'notify') {
+    try {
+      showCachedUpdateHint(VERSION);
+    } catch {
+      /* never break a command */
+    }
+  }
+
   switch (cmd) {
     case 'start': {
+      // start is already non-instant — a good place for the daily network refresh.
+      try { await refreshUpdateCheck(VERSION); } catch { /* ignore */ }
       if (rest[0] === ALL_KEYWORD) {
         await startAll();
         break;
@@ -137,6 +153,7 @@ async function main(): Promise<void> {
     case 'restart': {
       const name = rest[0];
       if (!name) usage();
+      try { await refreshUpdateCheck(VERSION); } catch { /* ignore */ }
       if (name === ALL_KEYWORD) await restartAll();
       else await restartCommand(name);
       break;
@@ -204,7 +221,15 @@ async function main(): Promise<void> {
       autoNudgeCommand(rest);
       break;
     }
+    case 'prune': {
+      const r = pruneCommand(rest[0]);
+      console.log(
+        `✓ pruned — op-log lines: ${r.opLogPruned}, corrupt backups: ${r.corruptDeleted}, corrupt-log lines: ${r.corruptLogPruned}, stale tmp: ${r.tmpDeleted}`,
+      );
+      break;
+    }
     case 'init': {
+      try { await refreshUpdateCheck(VERSION); } catch { /* ignore */ }
       initCommand();
       break;
     }

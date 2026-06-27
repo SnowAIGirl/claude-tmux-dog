@@ -47,6 +47,12 @@ export interface CdogConfig {
   timeout?: number;
   /** Display-only time format (dayjs tokens). Stored data stays raw ISO. Default `YYYY-MM-DD HH:mm:ss`. */
   timeformat?: string;
+  /**
+   * Retention window for cdog's OWN operation log (log_file), e.g. "7d".
+   * `cdog prune` and `cdog start` trim lines older than this. Does NOT touch
+   * claude's debug log (claude manages its own). Default "7d"; "0"/"off" disables.
+   */
+  log_retention?: string;
   /** Optional auto-management policy. */
   watchdog?: WatchdogConfig;
   /** Optional desktop notification settings. */
