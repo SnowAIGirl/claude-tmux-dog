@@ -27,7 +27,7 @@ description: Manage Claude Code background agents with cdog (claude-tmux-dog) �
 | `cdog auto-nudge <enable\|disable> <name\|all>` | Toggle auto-nudge in config (persistent) |
 | `cdog prune [name\|all]` | Trim cdog's own op-log to `log_retention` (default 7d) + clean `~/.cdog` housekeeping. Auto-runs on `start` |
 | `cdog message send --to <name> --message <text> [--from F]` | Send a message to an agent |
-| `cdog init` | Install `~/.cdog/` and wire hooks into `~/.claude/settings.json` |
+| `cdog init` | Install `~/.cdog/` and wire hooks into the project's `.claude/settings.json` (preserves existing user hooks) |
 | `cdog --version` / `cdog -v` | Print version (resolved from package.json) |
 
 ## Common Workflows
@@ -181,7 +181,7 @@ cdog stop all               # stop watching all agents
 cdog init
 ```
 
-Copies hooks to `~/.cdog/hooks/` and wires them into `~/.claude/settings.json`.
+Copies hook scripts to `~/.claude/hooks/` (global) and wires them into the **project-level** `./.claude/settings.json` (preserves any existing user hooks via incremental merge).
 
 ## Dual-Track Status
 
@@ -205,7 +205,7 @@ cdog tracks **two independent statuses** per agent:
 Configured in `cdog.json`:
 
 - `auto_nudge_stop: true` — on Stop hook, auto-send "continue" so it keeps working
-- `auto_restart: true` — on recoverable StopFailure (rate_limit, overloaded, timeout), auto-run breakToShell + compactOrNudge (compact if context ≥ 80%, else nudge). A definitive context-full signal (StopFailure message "context window limit", often mislabeled `max_output_tokens`) forces `/compact` regardless of token% — nudging a full context just re-fails. No circuit breaker: recoverable errors self-heal (claude's retry), get compacted, or are probed by the `stall_timeout` health-check (default 5m); only fatal errors (model offline / auth / billing) suspend the agent
+- `auto_restart: true` — on recoverable StopFailure (rate_limit, overloaded, timeout), auto-run breakToShell + compactOrNudge (compact if context ≥ 80%, else nudge). A definitive context-full signal (StopFailure message "context window limit", often mislabeled `max_output_tokens`) forces `/compact` regardless of token% — nudging a full context just re-fails. No circuit breaker: recoverable errors self-heal (claude's retry), get compacted, or are probed by the `stall_timeout` health-check (default 5m); only fatal errors (model offline / auth / billing) suspend the agent. **Stall liveness fallback:** when `stall_timeout` fires, cdog probes the pane — if claude is hard-dead (pane is a shell, `detectLiveness='shell'`), it relaunches claude in-place via `cat <md> | claude --resume <sid>` without killing the tmux session (only restart_count bumps); if claude is alive but stuck (`detectLiveness='claude'`), it falls back to breakToShell + nudge. **Death-loop detection:** `death_loop` watches for N consecutive fast Stops (default `threshold: 8` within `interval: "2m"`, no REAL_SUCCESS_RE clearing the counter) → nuclear rebuild: kill watchers → kill tmux session → new tmux session + `cat <md> | claude --resume <sid>` → respawn watchers + `agent-recovered` notify. A real streamed response / tool dispatch resets the counter to 0
 - `per_watch_duration: "7d"` — stores deadline timestamp; each start/restart resets it; on Stop/SessionEnd, if deadline passed, marks `completed`, kills watchers, keeps tmux alive
 - `max_tokens: "1m"` — max context tokens (accepts `200000`, `"200k"`, `"1m"`). Shared by pane_watcher and api_error_auto_compact
 - `api_error_auto_compact` — log watcher: tails claude debug log, classifies API errors (`fatal`/`timeout`/`provider`/`rate_limit`/`unknown`), triggers compact-or-nudge on threshold. `fatal` (model_not_found etc.) stops agent immediately. Always enabled
@@ -249,6 +249,12 @@ Both watchers are killed on `cdog stop` / `cdog delete` and respawned on `cdog r
     "max_tokens": "1m",                 // max context tokens (200000 / "200k" / "1m")
     "auto_nudge_stop": true,            // auto-nudge on Stop hook
     "auto_restart": true,               // auto-recover on StopFailure
+    "stall_timeout": "5m",              // no real activity (stream/tool) for this long → liveness probe + nudge/rebuild
+    "stall_cooldown": "10m",            // cooldown after stall-triggered nudge
+    "death_loop": {                     // death-loop nuclear rebuild
+      "threshold": 8,                  // consecutive fast Stops triggering nuclear rebuild
+      "interval": "2m"                 // window for counting consecutive fast Stops
+    },
     "api_error_auto_compact": {         // log watcher (reactive)
       "threshold": 3,                  // consecutive unknown errors → act
       "rate_limit_confirm_minutes": 10 // rate_limit two-hit confirmation window (min)
@@ -264,7 +270,8 @@ Both watchers are killed on `cdog stop` / `cdog delete` and respawned on `cdog r
 ## Notes
 
 - `all` is a reserved word — no agent may be named `all`
-- `cdog init` is a one-time setup; it backs up the existing `~/.claude/settings.json` first
-- `cdog start` auto-runs `cdog init` if hooks are missing (hooks can get reset by claude updates)
+- `cdog init` wires hooks into the **project-level** `.claude/settings.json` (in the cwd), NOT global `~/.claude/settings.json` — user's global hooks are never touched. The hook *script* still lives at `~/.claude/hooks/cdog-hook.sh` (global). The merge is **incremental & idempotent**: for each of the 7 hook types, cdog pushes its entry to the existing array only if no entry already references `cdog-hook.sh` — re-running `cdog init` never duplicates or overwrites user hooks. A `.cdog.bak` backup is written first
+- `cdog start` auto-runs `cdog init` (project-scoped to `cfg.cwd`) if hooks are missing (hooks can get reset by claude updates)
 - `cdog restart` also self-checks hook config — if any of the 7 hooks (incl. `UserPromptSubmit`) are missing (e.g. agent created by an older cdog version), it auto-installs them. Without this, a nudged agent stays `waiting` because no hook fires to set it `running`
+- **macOS auto-start on boot (launchd):** write `~/Library/LaunchAgents/com.cdog.autostart.plist` (RunAtLoad=true, KeepAlive=false) that runs `cdog start all` at login, then `launchctl load ~/Library/LaunchAgents/com.cdog.autostart.plist`. Uses the absolute `cdog` path (resolve via `which cdog` — typically the nvm shim). Logs to `/tmp/cdog-autostart.{log,err}`. To disable: `launchctl unload ~/Library/LaunchAgents/com.cdog.autostart.plist`
 - If `cdog` is not installed globally, run from the repo: `cd /path/to/claude-tmux-dog && npm run dev -- <cmd>` (tsx) or `node dist/cli.js <cmd>`

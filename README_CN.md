@@ -79,7 +79,7 @@ Reply Method: cdog message send --to snow-agent --message '找到 N 个' --from 
 # 安装
 npm install claude-tmux-dog -g
 
-# 一次性初始化(把 hook 写入 ~/.claude/settings.json)
+# 一次性初始化(把 hook 写入项目级 .claude/settings.json)
 cdog init
 
 # 创建配置
@@ -134,7 +134,8 @@ cdog log
 | **自动恢复** | API 错误 → 退 shell + compact-or-nudge | 自动从瞬态故障中恢复 |
 | **主动压缩** | 监控 token,80% 时压缩 | 在错误发生前预防 |
 | **配额调度** | 检测重置时间,额度恢复后定时续推 | 配额为零时不浪费重试 |
-| **卡死检测** | `stall_timeout`(默认 5m)无真实活动 → 续推 | 打破卡死循环 + 5xx 健康检查 |
+| **卡死检测** | `stall_timeout`(默认 5m)无真实活动 → 活性探针 + 续推/重建 | 打破卡死循环 + 5xx 健康检查 + 硬死恢复 |
+| **死亡循环重建** | 连续 N 次快速 Stop(默认 8 次/2m)→ 核重建(杀 tmux + `cat md \| claude --resume`) | 跳出中毒上下文死循环 |
 | **自动关闭** | N 天后标记 `completed`,杀 watcher,留 tmux | 长任务最终会停止续推 |
 | **消息总线** | 向任意 agent 的 pane 发文本 | 无需基础设施的跨 agent 协作 |
 
@@ -250,8 +251,9 @@ cdog log
 | `max_tokens` | `200000` | 最大上下文 token(`200000`、`"200k"`、`"1m"`) |
 | `auto_nudge_stop` | `false` | Stop hook 时自动发送 prompt |
 | `auto_restart` | `true` | 可恢复 StopFailure 自动恢复;致命错误挂起(保留 tmux,等 `cdog restart`) |
-| `stall_timeout` | `"5m"` | 无真实活动(stream/tool)超过此时长 → 续推。兼作 5xx/overloaded 健康检查间隔 |
+| `stall_timeout` | `"5m"` | 无真实活动(stream/tool)超过此时长 → 活性探针 + 续推/重建。兼作 5xx/overloaded 健康检查间隔 |
 | `stall_cooldown` | `"10m"` | 卡死续推后的冷却时间 |
+| `death_loop` | `{threshold: 8, interval: "2m"}` | 死亡循环检测:在 `interval` 内连续 N 次快速 Stop(无 REAL_SUCCESS_RE 清零计数)→ 核重建(杀 tmux + `cat md \| claude --resume` 重启)。真实流式响应/工具调用会重置计数 |
 | `api_error_auto_compact` | | log watcher 配置(始终启用) |
 | `pane_watcher` | | pane watcher 配置(始终启用) |
 
@@ -316,6 +318,33 @@ PostCompact 触发 → 发送 prompt 续推
 
 这能防止 C-c 误杀进程。
 
+### 4. 卡死活性兜底(claude 硬死)
+
+当 `stall_timeout` 触发(默认 5m 无真实活动),cdog 在续推前先探活 pane:
+
+- **`detectLiveness='claude'`**(claude 活着但卡住)→ breakToShell + 续推(原卡死路径)
+- **`detectLiveness='shell'`**(claude 硬死,pane 已退回 shell)→ **原地重建**:向现有 shell 发送 `cat <md> | claude --resume <sid>`。tmux 会话保持不杀,只 `restart_count` +1。watcher 不受影响(会话/PID 没变)
+
+这能捕获 claude 静默崩溃(OOM、段错误、panic)但 tmux 仍在运行的场景——直接续推只会打到死 shell。
+
+### 5. 死亡循环检测(核重建)
+
+如果 claude 反复立即停下不做实事,cdog 会升级到核重建。通过 `watchdog.death_loop` 配置(默认 `{threshold: 8, interval: "2m"}`):
+
+- 每次快速 Stop(距上次 Stop 间隔 < `interval`)会让 `fast_stop_count` +1
+- 真实流式响应/工具调用(日志中 REAL_SUCCESS_RE 命中,排除 `[API REQUEST]` 行)会把 `fast_stop_count` 重置为 0
+- 当 `fast_stop_count >= threshold` → **核重建**:
+  1. 杀 log watcher + pane watcher
+  2. 杀 tmux 会话(claude 随之退出)
+  3. 在 `cfg.cwd` 创建全新 tmux 会话
+  4. 运行 `cat <md> | claude --resume <sid> [--debug-file]`(重喂任务 md,resume 会话 id——上下文保留)
+  5. 重新启用 tmux 标题,重置状态(`fast_stop_count=0`、`claude_status='starting'`、刷新 `per_watch_deadline`)
+  6. 重生 watcher,发 `agent-recovered` 通知
+
+这能跳出 claude 在同一中毒上下文里反复停下的死循环(比如某个它无法逃脱的坏工具输出)——重建给它一个干净 shell + 重喂 md,同时保留会话 id。
+
+如果重建本身失败(如 tmux new-session 报错),agent 标记为 `failed` + `detached` 等待人工介入。
+
 ---
 
 ## 命令
@@ -334,7 +363,7 @@ PostCompact 触发 → 发送 prompt 续推
 | `cdog compact <name>` | 手动触发 compact-or-nudge |
 | `cdog auto-nudge <enable\|disable> <name\|all>` | 开关自动续推(持久化) |
 | `cdog prune [name\|all]` | 把 cdog 自己的 op-log 裁到 `log_retention`(默认 7d)+ 清 `~/.cdog`。`start` 时自动跑 |
-| `cdog init` | 把 hook 写入 `~/.claude/settings.json` |
+| `cdog init` | 安装 hook 脚本 + 写入项目级 `.claude/settings.json`(保留用户已有 hook) |
 | `cdog --version` / `-v` | 打印版本 |
 
 ### 状态双轨制
@@ -457,9 +486,68 @@ cdog message send --to hermes --message "进度如何" --from "snow-agent" \
 
 - **需要 tmux** —— cdog 在 tmux 里管理会话
 - **macOS 通知** —— 交互式通知用 macOS 通知中心。Linux 降级为普通 notify-send
-- **依赖 Hook** —— hook 必须通过 `cdog init` 安装。没有 hook,自动续推/恢复不可用
+- **依赖 Hook** —— hook 必须通过 `cdog init` 安装(写入**项目级** `.claude/settings.json`,绝不污染全局 `~/.claude/settings.json` —— 用户已有 hook 通过增量合并保留)。没有 hook,自动续推/恢复不可用
 - **Watcher 子进程** —— `cdog start` 把 pane watcher + log watcher 作为 detached 子进程启动。stop/delete/restart 通过进程组信号清理
 - **无熔断器** —— 可恢复错误(5xx/overloaded/timeout/unknown)不再 N 次后硬失败:靠 claude 自身重试自愈、上下文满则 `/compact`、或由 `stall_timeout` 健康检查探活(默认 5m)。仅致命错误(模型离线/鉴权/计费)挂起 agent
+
+---
+
+## 开机自启(macOS launchd)
+
+重启后自动把 cdog agent 拉起来,装一个 launchd plist 在登录时跑 `cdog start all`:
+
+```bash
+# 解析 cdog 绝对路径(nvm 用户:通常是 nvm shim)
+which cdog
+# 例如 /Users/you/.nvm/versions/node/v24.15.0/bin/cdog
+
+# 写 plist(把 ProgramArguments 改成你的 `which cdog` 输出)
+cat > ~/Library/LaunchAgents/com.cdog.autostart.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cdog.autostart</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.nvm/versions/node/v24.15.0/bin/cdog</string>
+    <string>start</string>
+    <string>all</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/tmp/cdog-autostart.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cdog-autostart.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/you/.nvm/versions/node/v24.15.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
+# 校验
+plutil -lint ~/Library/LaunchAgents/com.cdog.autostart.plist
+
+# 加载(下次登录/重启时生效)
+launchctl load ~/Library/LaunchAgents/com.cdog.autostart.plist
+
+# 卸载
+# launchctl unload ~/Library/LaunchAgents/com.cdog.autostart.plist
+# rm ~/Library/LaunchAgents/com.cdog.autostart.plist
+```
+
+说明:
+- `RunAtLoad=true` + `KeepAlive=false` —— 登录时启动一次,cdog 退出后不重启(cdog 的 watcher 是长寿命 detached 子进程,launchd 只负责引导)
+- 在 `EnvironmentVariables` 里设 `PATH`,让 nvm 装的 `cdog` 能找到 `node`、`tmux` 等
+- 日志写到 `/tmp/cdog-autostart.{log,err}` —— 出错时查这里
+- `cdog start all` 会跳过 tmux 会话仍在运行的 agent,所以即使部分 agent 还活着,跑这个也安全
 
 ---
 

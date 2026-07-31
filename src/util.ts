@@ -13,7 +13,6 @@ export const CLAUDE_DIR = join(HOME, '.claude');
 export const HOOKS_DIR = join(CLAUDE_DIR, 'hooks');
 export const LOGS_DIR = join(CDOG_DIR, 'logs');
 export const STATE_PATH = join(CDOG_DIR, 'state.json');
-export const CLAUDE_SETTINGS_PATH = join(CLAUDE_DIR, 'settings.json');
 
 // ANSI color helpers (disabled when stdout is not a TTY).
 const USE_COLOR = process.stdout.isTTY === true;

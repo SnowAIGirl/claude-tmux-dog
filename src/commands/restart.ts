@@ -59,14 +59,26 @@ export async function restartCommand(name: string): Promise<void> {
   clearRateLimitFirstAt(name);
   clearQuotaNudge(name);
 
+  // Load config ONCE (best-effort) — reused for the recover command, the watch
+  // deadline, the kick prompt, and the hooks project-cwd below. Previously this
+  // read the cdog.json from disk up to three times per restart.
+  const cfg =
+    agent.config_path && existsSync(agent.config_path)
+      ? (() => {
+          try { return loadConfig(agent.config_path); } catch { return null; }
+        })()
+      : null;
+
   // Auto-init hooks if missing/incomplete (claude settings can get reset by
   // updates/other tools, and historical cdog versions didn't install all 7
   // hooks — e.g. UserPromptSubmit). Without it, a nudged agent stays "waiting"
   // because no hook fires to set it "running".
-  if (!hooksInstalled() || !hooksConfigured()) {
+  // Wire into the project-level .claude/settings.json (cfg.cwd), not global.
+  const hooksCwd = cfg?.cwd ?? process.cwd();
+  if (!hooksInstalled() || !hooksConfigured(hooksCwd)) {
     console.log(`⚙ ${name}: hooks missing/incomplete — running cdog init automatically...`);
     installHookScripts();
-    const ok = mergeHookSettings();
+    const ok = mergeHookSettings(hooksCwd);
     if (ok) {
       console.log('✓ hooks installed and configured');
     } else {
@@ -78,16 +90,6 @@ export async function restartCommand(name: string): Promise<void> {
   // If it died (e.g. user C-c'd it, pane is now a shell), restart it via --resume.
   // Track whether we relaunched so we know NOT to kick (relaunch re-inits via md).
   const liveness = detectLiveness(session);
-
-  // Load config ONCE (best-effort) — reused for the recover command, the watch
-  // deadline, and the kick prompt. Previously this read the cdog.json from disk
-  // up to three times per restart.
-  const cfg =
-    agent.config_path && existsSync(agent.config_path)
-      ? (() => {
-          try { return loadConfig(agent.config_path); } catch { return null; }
-        })()
-      : null;
 
   let resumed = false;
   if (liveness !== 'claude') {

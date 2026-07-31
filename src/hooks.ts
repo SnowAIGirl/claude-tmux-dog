@@ -14,9 +14,19 @@ import {
   HOOKS_DIR,
   CDOG_DIR,
   CLAUDE_DIR,
-  CLAUDE_SETTINGS_PATH,
   ensureCdogDir,
 } from './util.js';
+
+/**
+ * Project-level `.claude/settings.json` path. cdog writes hook config here
+ * (NOT global `~/.claude/settings.json`) so user's global hooks stay untouched.
+ * The hook *script* itself still lives at `~/.claude/hooks/cdog-hook.sh` (global),
+ * only the settings wiring is project-scoped. Defaults to `process.cwd()` for
+ * `cdog init`; callers with a known agent cwd (e.g. `cdog start`) should pass it.
+ */
+export function projectSettingsPath(projectCwd: string = process.cwd()): string {
+  return join(projectCwd, '.claude', 'settings.json');
+}
 
 // Single universal hook script handles all events. cdog differentiates by
 // reading hook_event_name from the forwarded JSON.
@@ -36,11 +46,12 @@ export function hooksInstalled(): boolean {
   return HOOK_NAMES.every((n) => existsSync(join(HOOKS_DIR, n)));
 }
 
-/** Are the hooks wired into ~/.claude/settings.json? */
-export function hooksConfigured(): boolean {
-  if (!existsSync(CLAUDE_SETTINGS_PATH)) return false;
+/** Are the hooks wired into the project's .claude/settings.json? */
+export function hooksConfigured(projectCwd: string = process.cwd()): boolean {
+  const settingsPath = projectSettingsPath(projectCwd);
+  if (!existsSync(settingsPath)) return false;
   try {
-    const settings = JSON.parse(readFileSync(CLAUDE_SETTINGS_PATH, 'utf8'));
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
     const hooks = settings?.hooks ?? {};
     return (
       Array.isArray(hooks.Stop) &&
@@ -87,25 +98,35 @@ export function installHookScripts(): void {
   }
 }
 
-/** Merge hook config into ~/.claude/settings.json (backing up first). Returns true on success. */
-export function mergeHookSettings(): boolean {
-  const dir = dirname(CLAUDE_SETTINGS_PATH);
+/**
+ * Merge cdog hook config into the project's `.claude/settings.json` (backing up first).
+ *
+ * Project-scoped (NOT global `~/.claude/settings.json`) so user's global hooks
+ * are never touched. The hook *script* path stays global (`~/.claude/hooks/cdog-hook.sh`).
+ *
+ * Incremental: for each hook type, push the cdog entry to the existing array
+ * only if no entry already references `cdog-hook.sh` (idempotent — re-running
+ * `cdog init` never duplicates or overwrites user hooks). Returns true on success.
+ */
+export function mergeHookSettings(projectCwd: string = process.cwd()): boolean {
+  const settingsPath = projectSettingsPath(projectCwd);
+  const dir = dirname(settingsPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   let settings: Record<string, unknown> = {};
-  if (existsSync(CLAUDE_SETTINGS_PATH)) {
+  if (existsSync(settingsPath)) {
     try {
-      settings = JSON.parse(readFileSync(CLAUDE_SETTINGS_PATH, 'utf8'));
+      settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
       // backup
       writeFileSync(
-        CLAUDE_SETTINGS_PATH + '.cdog.bak',
-        readFileSync(CLAUDE_SETTINGS_PATH, 'utf8'),
+        settingsPath + '.cdog.bak',
+        readFileSync(settingsPath, 'utf8'),
       );
     } catch {
       // corrupt — start fresh but keep a backup
       writeFileSync(
-        CLAUDE_SETTINGS_PATH + '.cdog.bak',
-        readFileSync(CLAUDE_SETTINGS_PATH, 'utf8'),
+        settingsPath + '.cdog.bak',
+        readFileSync(settingsPath, 'utf8'),
       );
       settings = {};
     }
@@ -113,23 +134,42 @@ export function mergeHookSettings(): boolean {
 
   const hooks = (settings.hooks as Record<string, unknown>) ?? {};
   const hookCmd = join(CLAUDE_DIR, 'hooks') + '/';
-  const block = (script: string) => [
-    { hooks: [{ type: 'command', command: hookCmd + script }] },
-  ];
+  const block = (script: string) => ({
+    hooks: [{ type: 'command', command: hookCmd + script }],
+  });
 
-  hooks.Stop = block('cdog-hook.sh');
-  hooks.StopFailure = block('cdog-hook.sh');
-  hooks.SessionStart = block('cdog-hook.sh');
-  hooks.SessionEnd = block('cdog-hook.sh');
-  hooks.PreCompact = block('cdog-hook.sh');
-  hooks.PostCompact = block('cdog-hook.sh');
-  hooks.UserPromptSubmit = block('cdog-hook.sh');
+  // Incremental update: push cdog-hook entry to each hook type's array,
+  // but skip if a cdog-hook.sh entry already exists (don't overwrite user hooks).
+  const HOOK_TYPES = [
+    'Stop',
+    'StopFailure',
+    'SessionStart',
+    'SessionEnd',
+    'PreCompact',
+    'PostCompact',
+    'UserPromptSubmit',
+  ] as const;
+  for (const hookType of HOOK_TYPES) {
+    const arr = Array.isArray(hooks[hookType]) ? (hooks[hookType] as unknown[]) : [];
+    const alreadyHas = arr.some((entry) => {
+      try {
+        const cmd = (entry as { hooks?: Array<{ command?: string }> })?.hooks?.[0]?.command;
+        return typeof cmd === 'string' && cmd.includes('cdog-hook.sh');
+      } catch {
+        return false;
+      }
+    });
+    if (!alreadyHas) {
+      arr.push(block('cdog-hook.sh'));
+    }
+    hooks[hookType] = arr;
+  }
   settings.hooks = hooks;
 
   try {
-    writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
     // validate it parses
-    JSON.parse(readFileSync(CLAUDE_SETTINGS_PATH, 'utf8'));
+    JSON.parse(readFileSync(settingsPath, 'utf8'));
     return true;
   } catch (e) {
     console.error('✗ failed to write settings.json:', (e as Error).message);

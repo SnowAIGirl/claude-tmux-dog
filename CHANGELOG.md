@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.5.1 (2026-08-01)
+
+### Features
+- **Death-loop detection (nuclear rebuild).** When claude Stops N times in a row — each within `death_loop.interval` (default `2m`) of the previous, with no real success (`Stream started` / `tool_dispatch_start`) in between — cdog declares a death loop and rebuilds: kill watchers → kill tmux session → `new-session` + `claude --resume` (re-feeds md) → respawn watchers → notify `agent-recovered`. This backstops the observed case of 46 nudges / 58 minutes of zero work (2026-06-22 session data). Configurable via `watchdog.death_loop = { threshold, interval }` (defaults: 8, `"2m"`). The streak counter resets on any real success, so a working agent is never affected.
+- **Project-scoped hook config.** `cdog init` / `start` / `restart` now wire hooks into the project's `.claude/settings.json` (`<cwd>/.claude/settings.json`) instead of the global `~/.claude/settings.json`, so user's global hooks are never touched. Merging is incremental and idempotent: for each of the 7 hook types the cdog entry is pushed only if no `cdog-hook.sh` entry already exists — re-running `cdog init` never duplicates or overwrites user hooks. Hook scripts still live in the global `~/.claude/hooks/`.
+
+### Bug Fixes
+- **Stall recovery now checks liveness before nudging.** When the 5-min stall watchdog fires and the claude process has died (segfault / killed / exited → shell is foreground), cdog no longer types a nudge into a dead shell. It detects `liveness=shell` and rebuilds claude in the existing session via `claude --resume` (no session kill needed; both watchers keep running). If the tmux session itself is gone, the stall path yields to the hook-driven restart instead of typing into nothing.
+- **Stall watchdog doc corrected to `REAL_SUCCESS_RE`.** The stall timer resets only on real success (`Stream started` / `tool_dispatch_start`), not bare `[API REQUEST]` (which fires on every dispatched request, including ones that immediately 429). Comment and implementation now agree.
+
+### Improvements
+- **`cdog restart` loads config once.** The cdog.json was previously read from disk up to three times per restart; it is now loaded once and reused for the recover command, watch deadline, kick prompt, and hook project-cwd.
+- **Fast-stop streak cleared on real success.** A genuine `Stream started` / `tool_dispatch_start` resets the death-loop counter so a healthy agent's occasional Stop sequences never accumulate toward a rebuild threshold.
+
+---
+
 ## v0.5.0 (2026-06-29)
 
 ### Breaking (behavior)

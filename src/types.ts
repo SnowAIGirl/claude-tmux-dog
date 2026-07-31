@@ -189,6 +189,14 @@ export interface WatchdogConfig {
   api_error_auto_compact?: ApiErrorAutoCompactConfig;
   /** Proactive context compaction: monitor ↑ tokens in tmux pane, compact before context overflows. */
   pane_watcher?: PaneWatcherConfig;
+  /**
+   * Death-loop detection: if claude Stops N times within a short window
+   * (interval) with no real success (stream/tool) in between, it's spinning
+   * (nudge → Stop → nudge → Stop …). Trigger a nuclear rebuild: kill session
+   * + new-session + `claude --resume` + respawn watchers. Default threshold 8,
+   * interval "2m".
+   */
+  death_loop?: DeathLoopConfig;
 }
 
 /**
@@ -248,6 +256,18 @@ export interface PaneWatcherConfig {
   compact_ratio?: number;
   /** Poll interval in seconds. Default 30. */
   interval?: number;
+}
+
+/**
+ * Death-loop detection config. When claude Stops `threshold` times in a row,
+ * each within `interval` of the previous and with no real success
+ * (stream/tool dispatch) in between, cdog declares a death loop and rebuilds.
+ */
+export interface DeathLoopConfig {
+  /** Consecutive fast Stop count that triggers a nuclear rebuild. Default 8. */
+  threshold?: number;
+  /** Max interval between Stops to count as "fast" (e.g. "2m"). Default "2m". */
+  interval?: string;
 }
 
 /** One agent's persisted runtime state, keyed by name in state.json. */
@@ -328,6 +348,15 @@ export interface AgentState {
    * Cleared on real quota confirmed / SUCCESS_RE (claude recovered).
    */
   rate_limit_first_at?: string | null;
+  /** ISO timestamp of the last Stop hook event (death-loop detection). */
+  last_stop_at?: string | null;
+  /**
+   * Consecutive fast Stop count: increments when the next Stop arrives within
+   * death_loop.interval of the previous one, resets to 0 on a real success
+   * (stream/tool dispatch, via logwatcher) or when a Stop arrives after the
+   * interval. Reaching death_loop.threshold triggers a nuclear rebuild.
+   */
+  fast_stop_count?: number;
   /** Runtime copy of watchdog config (for status display and watcher reads). */
   watchdog?: WatchdogConfig;
 }

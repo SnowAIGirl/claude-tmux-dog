@@ -79,7 +79,7 @@ No message broker. No external daemon. tmux IS the bus.
 # Install
 npm install claude-tmux-dog -g
 
-# One-time setup (wires hooks into ~/.claude/settings.json)
+# One-time setup (wires hooks into the project's .claude/settings.json)
 cdog init
 
 # Create a config
@@ -134,7 +134,8 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 | **Auto-recovery**     | Breaks to shell + compact-or-nudge on API errors           | Recovers from transient failures automatically  |
 | **Proactive compact** | Monitors tokens, compacts at 80%                           | Prevents API errors before they happen          |
 | **Quota scheduling**  | Detects reset time, schedules nudge after quota resets     | No wasted retries while quota is zero           |
-| **Stall detection**   | No real activity for `stall_timeout` (default 5m) → nudge  | Breaks stuck loops + 5xx health-check           |
+| **Stall detection**   | No real activity for `stall_timeout` (default 5m) → liveness probe + nudge/rebuild | Breaks stuck loops + 5xx health-check + hard-dead recovery |
+| **Death-loop rebuild**| N consecutive fast Stops (default 8 in 2m) → nuclear rebuild (kill tmux + `cat md \| claude --resume`) | Escapes poisoned-context loops |
 | **Auto-shutdown**     | Marks `completed` after N days, kills watchers, keeps tmux | Long-running tasks eventually stop nudging      |
 | **Message bus**       | Send text to any agent's pane                              | Cross-agent coordination without infrastructure |
 
@@ -250,8 +251,9 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 | `max_tokens`             | `200000`     | Max context tokens (`200000`, `"200k"`, `"1m"`)                                                                |
 | `auto_nudge_stop`        | `false`      | Auto-send prompt on Stop hook                                                                                  |
 | `auto_restart`           | `true`       | Auto-recover on recoverable StopFailure; fatal errors suspend (keep tmux, wait for `cdog restart`)             |
-| `stall_timeout`          | `"5m"`       | No real activity (stream/tool) for this long → nudge. Doubles as the 5xx/overloaded health-check interval      |
+| `stall_timeout`          | `"5m"`       | No real activity (stream/tool) for this long → liveness probe + nudge/rebuild. Doubles as the 5xx/overloaded health-check interval |
 | `stall_cooldown`         | `"10m"`      | Cooldown after stall-triggered nudge                                                                           |
+| `death_loop`             | `{threshold: 8, interval: "2m"}` | Death-loop detection: N consecutive fast Stops within `interval` (no REAL_SUCCESS_RE clearing the counter) → nuclear rebuild (kill tmux + relaunch via `cat md \| claude --resume`). A real streamed response / tool dispatch resets the counter |
 | `api_error_auto_compact` | <br />       | Log watcher config (always enabled)                                                                            |
 | `pane_watcher`           | <br />       | Pane watcher config (always enabled)                                                                           |
 
@@ -316,6 +318,33 @@ All three paths use the `cdog-recover` marker technique:
 
 This prevents C-c from killing the wrong process.
 
+### 4. Stall Liveness Fallback (Hard-Dead Claude)
+
+When `stall_timeout` fires (no real activity for 5m by default), cdog probes the pane's liveness before nudging:
+
+- **`detectLiveness='claude'`** (claude alive but stuck) → breakToShell + nudge (the original stall path)
+- **`detectLiveness='shell'`** (claude hard-dead, pane is now a shell) → **in-place rebuild**: send `cat <md> | claude --resume <sid>` to the existing shell. The tmux session stays alive (no kill), only `restart_count` bumps. Watchers are untouched because the session/PID didn't change
+
+This catches the case where claude has crashed silently (OOM, segfault, panic) but tmux is still running — a plain nudge would hit a dead shell.
+
+### 5. Death-Loop Detection (Nuclear Rebuild)
+
+If claude keeps stopping immediately without making progress, cdog escalates to a nuclear rebuild. Configured via `watchdog.death_loop` (default `{threshold: 8, interval: "2m"}`):
+
+- Each fast Stop (within `interval` of the previous one) bumps `fast_stop_count`
+- A real streamed response / tool dispatch (REAL_SUCCESS_RE match in the log, excluding `[API REQUEST]` lines) resets `fast_stop_count` to 0
+- When `fast_stop_count >= threshold` → **nuclear rebuild**:
+  1. Kill log watcher + pane watcher
+  2. Kill the tmux session (claude dies with it)
+  3. Create a fresh tmux session in `cfg.cwd`
+  4. Run `cat <md> | claude --resume <sid> [--debug-file]` (re-feed the task md, resume the session id — context preserved)
+  5. Re-enable tmux titles, reset state (`fast_stop_count=0`, `claude_status='starting'`, fresh `per_watch_deadline`)
+  6. Respawn watchers, fire `agent-recovered` notify
+
+This breaks out of loops where claude keeps stopping on the same poisoned context (e.g. a bad tool output it can't escape) — the rebuild gives it a clean shell + fresh md feed while keeping the session id.
+
+If the rebuild itself fails (e.g. tmux new-session error), the agent is marked `failed` + `detached` for manual intervention.
+
 ***
 
 ## Commands
@@ -334,7 +363,7 @@ This prevents C-c from killing the wrong process.
 | `cdog compact <name>`                                                          | Manually trigger compact-or-nudge                                                              |
 | `cdog auto-nudge <enable\|disable> <name\|all>`                                | Toggle auto-nudge (persistent)                                                                 |
 | `cdog prune [name\|all]`                                                       | Trim cdog's own op-log to `log_retention` (default 7d) + clean `~/.cdog`. Auto-runs on `start` |
-| `cdog init`                                                                    | Install hooks into `~/.claude/settings.json`                                                   |
+| `cdog init`                                                                    | Install hook scripts + wire into the project's `.claude/settings.json` (preserves user hooks)  |
 | `cdog --version` / `-v`                                                        | Print version                                                                                  |
 
 ### Dual-Track Status
@@ -462,9 +491,68 @@ Best-effort: a failing or timing-out command (default 30s, override with
 
 - **tmux required** — cdog manages sessions inside tmux
 - **macOS notifications** — Interactive notifications use macOS Notification Center. Linux falls back to plain notify-send
-- **Hook-based** — Hooks must be installed via `cdog init`. Without them, auto-nudge/recover won't work
+- **Hook-based** — Hooks must be installed via `cdog init` (wired into the **project-level** `.claude/settings.json`, never the global `~/.claude/settings.json` — user's global hooks are preserved via incremental merge). Without them, auto-nudge/recover won't work
 - **Watcher subprocesses** — `cdog start` spawns pane watcher + log watcher as detached children. They're killed on stop/delete/restart via process-group signaling
 - **No circuit breaker** — Recoverable errors (5xx, overloaded, timeout, unknown) no longer hard-fail after N retries. They self-heal via claude's own retry, get `/compact`'d on context-full, or are probed by the `stall_timeout` health-check (default 5m). Only fatal errors (model offline / auth / billing) suspend the agent
+
+***
+
+## Auto-start on Boot (macOS launchd)
+
+To bring cdog agents back up automatically after a reboot, install a launchd plist that runs `cdog start all` at login:
+
+```bash
+# Resolve the absolute cdog path (nvm users: this is typically the nvm shim)
+which cdog
+# e.g. /Users/you/.nvm/versions/node/v24.15.0/bin/cdog
+
+# Write the plist (edit ProgramArguments to match your `which cdog` output)
+cat > ~/Library/LaunchAgents/com.cdog.autostart.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cdog.autostart</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.nvm/versions/node/v24.15.0/bin/cdog</string>
+    <string>start</string>
+    <string>all</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/tmp/cdog-autostart.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cdog-autostart.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/you/.nvm/versions/node/v24.15.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
+# Validate
+plutil -lint ~/Library/LaunchAgents/com.cdog.autostart.plist
+
+# Load (takes effect at next login / reboot)
+launchctl load ~/Library/LaunchAgents/com.cdog.autostart.plist
+
+# Uninstall
+# launchctl unload ~/Library/LaunchAgents/com.cdog.autostart.plist
+# rm ~/Library/LaunchAgents/com.cdog.autostart.plist
+```
+
+Notes:
+- `RunAtLoad=true` + `KeepAlive=false` — start once at login, don't restart if cdog exits (cdog's watchers are long-lived detached subprocesses; the launchd job just bootstraps them)
+- Set `PATH` in `EnvironmentVariables` so nvm-installed `cdog` can find `node`, `tmux`, etc.
+- Logs go to `/tmp/cdog-autostart.{log,err}` — inspect on failure
+- `cdog start all` skips agents whose tmux session is already running, so this is safe to run even if some agents are still alive
 
 ***
 

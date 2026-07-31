@@ -355,10 +355,12 @@ export async function runLogWatcher(agentName: string): Promise<void> {
   let transientNotifyCount = 0;
 
   // ---- Stall watchdog ----
-  // A single setTimeout that resets on every real activity (SUCCESS_RE match:
-  // tool_dispatch_start / [API REQUEST] / Stream started). If it fires (no real
-  // activity for stallTimeoutMs), claude is stuck (Wibbling but no output) →
-  // breakToShell + nudge. Cooldown (stallCooldownMs) prevents nudge loops.
+  // A single setTimeout that resets on every real activity (REAL_SUCCESS_RE
+  // match: tool_dispatch_start / Stream started — NOT [API REQUEST], which
+  // fires on every dispatched request including ones that immediately 429, so
+  // it must NOT reset the health timer). If it fires (no real activity for
+  // stallTimeoutMs), claude is stuck (Wibbling but no output) → breakToShell
+  // + nudge. Cooldown (stallCooldownMs) prevents nudge loops.
   // No state persistence, no extra polling — the timer itself is the detector.
   let stallWatchdog: NodeJS.Timeout | null = null;
   let lastStallAt = 0;
@@ -396,16 +398,38 @@ export async function runLogWatcher(agentName: string): Promise<void> {
           return;
         }
       }
-      writeWatcherLog(agentName, `STALL detected: no real activity for ${Math.round(acConfig.stallTimeoutMs / 60_000)}min, breakToShell + nudge`);
-      // A stall kicks claude with a nudge, so notify as 'nudge' (plays nudge.mp3),
-      // NOT 'api-error' — claude is idle/stuck, not failing.
-      notify(agentName, 'nudge', agentName, `Stall detected (no activity ${Math.round(acConfig.stallTimeoutMs / 60_000)}min) — nudging`).catch(() => {});
+      writeWatcherLog(agentName, `STALL detected: no real activity for ${Math.round(acConfig.stallTimeoutMs / 60_000)}min, checking liveness`);
       const session = loadState()[agentName]?.tmux_session ?? agentName;
-      if (tmuxHasSession(session)) {
-        breakToShell(session)
-          .then(() => nudgeAgentFromWatcher(agentName, session))
-          .catch(() => nudgeAgentFromWatcher(agentName, session));
+      if (!tmuxHasSession(session)) {
+        writeWatcherLog(agentName, `stall: tmux session gone, cannot recover here — letting hook path handle restart`);
+        armStallWatchdog();
+        return;
       }
+      // Liveness check FIRST: if claude process died (segfault / killed /
+      // exited → shell is foreground), breakToShell + nudge would just type
+      // into a dead shell. Skip straight to rebuild: send `claude --resume`
+      // to the existing shell. Session is alive (shell), only claude died,
+      // so no kill/new-session needed. Watchers keep running: log watcher's
+      // tail -F follows the file (new claude writes same --debug-file), pane
+      // watcher's pipe-pane is bound to the session (still alive).
+      const liveness = detectLiveness(session);
+      if (liveness === 'shell') {
+        writeWatcherLog(agentName, `stall: claude process gone (liveness=shell), rebuilding via claude --resume`);
+        notify(agentName, 'agent-recovered', agentName,
+          `Stall + claude dead — rebuilding (claude --resume in existing shell)`).catch(() => { });
+        rebuildClaudeInSession(agentName, session);
+        armStallWatchdog();
+        return;
+      }
+      // claude alive but stuck (Wibbling, no output) → breakToShell + nudge.
+      // Notify as 'nudge' (plays nudge.mp3), NOT 'api-error' — claude is
+      // idle/stuck, not failing.
+      writeWatcherLog(agentName, `stall: claude alive (liveness=${liveness}), breakToShell + nudge`);
+      notify(agentName, 'nudge', agentName,
+        `Stall detected (no activity ${Math.round(acConfig.stallTimeoutMs / 60_000)}min) — nudging`).catch(() => { });
+      breakToShell(session)
+        .then(() => nudgeAgentFromWatcher(agentName, session))
+        .catch(() => nudgeAgentFromWatcher(agentName, session));
       // Re-arm so we keep watching after the nudge
       armStallWatchdog();
     }, acConfig.stallTimeoutMs);
@@ -470,6 +494,13 @@ export async function runLogWatcher(agentName: string): Promise<void> {
           armStallWatchdog(); // real success → reset health timer
           clearRateLimitFirstAt(agentName);
           clearQuotaNudge(agentName);
+          // Real success breaks any death-loop streak — claude actually did
+          // work, so the next N fast Stops would be a NEW streak, not a
+          // continuation. Cheap write (only fires on stream/tool, not every
+          // [API REQUEST]).
+          mutateAgent(agentName, (a) => {
+            if (a.fast_stop_count) a.fast_stop_count = 0;
+          });
         }
         continue;
       }
@@ -537,7 +568,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
           if (kind === 'fatal') {
             // model_not_found / authentication_failed → model is offline, stop immediately
             writeWatcherLog(agentName, `FATAL error (${kind}): stopping agent — model offline`);
-            handleFatalError(agentName, trimmed).catch(() => {});
+            handleFatalError(agentName, trimmed).catch(() => { });
             return; // watcher exits after fatal
           }
           if (kind === 'rate_limit') {
@@ -568,7 +599,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
                 mutateAgent(agentName, (a) => { a.claude_status = 'pending'; });
                 scheduleQuotaNudge(agentName, resetTime, trimmed);
                 if (tmuxHasSession(tmuxSession)) {
-                  breakToShell(tmuxSession).catch(() => {});
+                  breakToShell(tmuxSession).catch(() => { });
                 }
               }
               continue;
@@ -590,7 +621,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
   });
 
   // Keep alive
-  await new Promise(() => {});
+  await new Promise(() => { });
 }
 
 /** Persist the error counter to state (throttled by caller). */
@@ -645,6 +676,46 @@ function nudgeAgentFromWatcher(agentName: string, tmuxSession: string): void {
     writeWatcherLog(agentName, `nudge #${(loadState()[agentName]?.nudge_count ?? 0)} ("${prompt}")`);
   } catch (e) {
     writeWatcherLog(agentName, `nudge failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Rebuild claude in an existing tmux session whose claude process died
+ * (shell is foreground — segfault / killed / exited).
+ *
+ * Sends `cat <md> | claude --resume <sid> [--debug-file ...]` to the shell.
+ * The tmux session is alive (only claude died), so no kill/new-session:
+ *   - log watcher's tail -F follows the file (new claude writes same --debug-file)
+ *   - pane watcher's pipe-pane is bound to the session (still alive)
+ * Both watchers keep running without respawn.
+ *
+ * Used by the stall watchdog when detectLiveness returns 'shell'.
+ */
+function rebuildClaudeInSession(agentName: string, tmuxSession: string): void {
+  const state = loadState()[agentName];
+  if (!state) return;
+  const sessionId = state.session_id;
+  let recoverCmd: string;
+  try {
+    if (!state.config_path) throw new Error('no config_path');
+    const cfg = loadConfig(state.config_path);
+    recoverCmd = buildRecoverCommand(cfg, sessionId);
+  } catch (e) {
+    writeWatcherLog(agentName, `rebuild: failed to load config: ${(e as Error).message}`);
+    return;
+  }
+  try {
+    tmuxSendText(tmuxSession, recoverCmd, true);
+    mutateAgent(agentName, (a) => {
+      a.claude_status = 'running';
+      a.restart_count = (a.restart_count ?? 0) + 1;
+      a.last_restart_at = dayjs().toISOString();
+      a.stop_reason = null;
+      a.ended_at = null;
+    });
+    writeWatcherLog(agentName, `rebuild: sent "${recoverCmd}" to shell — claude --resume in flight`);
+  } catch (e) {
+    writeWatcherLog(agentName, `rebuild: failed to send command: ${(e as Error).message}`);
   }
 }
 
@@ -712,7 +783,7 @@ async function handleFatalError(agentName: string, errorLine: string): Promise<v
 
   // 4. Notify
   notify(agentName, 'agent-failed', agentName,
-    `FATAL: suspended (not killed) — ${errorLine}`).catch(() => {});
+    `FATAL: suspended (not killed) — ${errorLine}`).catch(() => { });
 }
 
 // Track active quota timers per agent to avoid duplicate scheduling
@@ -855,7 +926,7 @@ function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: strin
 
     // Notify
     notify(agentName, 'nudge', agentName,
-      `Quota reset — auto-nudge sent`).catch(() => {});
+      `Quota reset — auto-nudge sent`).catch(() => { });
   }, waitMs);
 
   quotaTimers.set(agentName, timer);

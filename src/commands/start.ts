@@ -37,10 +37,12 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
   const cfg: CdogConfig = loadConfig(absConfig);
 
   // Auto-init hooks if missing (claude settings can get reset by updates/other tools).
-  if (!hooksInstalled() || !hooksConfigured()) {
+  // Wire into the project-level .claude/settings.json (cfg.cwd), not global, to
+  // avoid overwriting user's global hooks.
+  if (!hooksInstalled() || !hooksConfigured(cfg.cwd)) {
     console.log('⚙ hooks not detected — running cdog init automatically...');
     installHookScripts();
-    const ok = mergeHookSettings();
+    const ok = mergeHookSettings(cfg.cwd);
     if (ok) {
       console.log('✓ hooks installed and configured');
     } else {
